@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 
@@ -48,7 +49,11 @@ def create_app() -> FastAPI:
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
     app.mount(
         "/static",
-        StaticFiles(directory=str(Path(__file__).resolve().parents[2] / "static")),
+        StaticFiles(
+            directory=os.environ.get(
+                "OPS_STATIC_DIR", str(Path(__file__).resolve().parents[2] / "static")
+            )
+        ),
         name="static",
     )
     if settings.session_secret:

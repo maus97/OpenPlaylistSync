@@ -1,5 +1,6 @@
 """HTTP routes for health, operator flows, and the safety-first UI."""
 
+import os
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -26,7 +27,11 @@ from ops.sync.coordinator import SyncCoordinator
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 
 router = APIRouter()
-templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[3] / "templates"))
+templates = Jinja2Templates(
+    directory=os.environ.get(
+        "OPS_TEMPLATES_DIR", str(Path(__file__).resolve().parents[3] / "templates")
+    )
+)
 
 
 def settings() -> Settings:
