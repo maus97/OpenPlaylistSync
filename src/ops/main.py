@@ -1,9 +1,11 @@
 """FastAPI application entry point."""
 
 from contextlib import asynccontextmanager
+from pathlib import Path
 
 import uvicorn
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
 
 from ops import __version__
@@ -44,6 +46,11 @@ def create_app() -> FastAPI:
 
     settings = get_settings()
     app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
+    app.mount(
+        "/static",
+        StaticFiles(directory=str(Path(__file__).resolve().parents[2] / "static")),
+        name="static",
+    )
     if settings.session_secret:
         app.add_middleware(
             SessionMiddleware,

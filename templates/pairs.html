@@ -1,38 +1,64 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Playlist pairs</title>
-  </head>
-  <body>
-    <main>
-      <h1>Playlist pairs</h1>
-      <p>Use provider-prefixed playlist IDs, for example <code>spotify:playlist-id</code>.</p>
-      {% if accounts %}
-      <form method="post" action="/pairs">
-        <label>Source account
-          <select name="source_account_id" required>
-          {% for account in accounts %}<option value="{{ account.id }}">{{ account.id }}: {{ account.provider_name }} / {{ account.external_account_id }}</option>{% endfor %}
-          </select>
-        </label>
-        <label>Target account
-          <select name="target_account_id" required>
-          {% for account in accounts %}<option value="{{ account.id }}">{{ account.id }}: {{ account.provider_name }} / {{ account.external_account_id }}</option>{% endfor %}
-          </select>
-        </label>
-        <label>Source playlist ID <input name="source_playlist_id" required></label>
-        <label>Target playlist ID <input name="target_playlist_id" required></label>
-        <button type="submit">Save pair</button>
-      </form>
-      {% else %}
-      <p>Connect a provider account before creating a pair.</p>
-      {% endif %}
-      <h2>Configured pairs</h2>
-      {% if pairs %}
-      <ul>{% for pair in pairs %}<li><a href="/sync/plan/{{ pair.id }}">Pair {{ pair.id }}</a>: {{ pair.source_playlist_id }} → {{ pair.target_playlist_id }}</li>{% endfor %}</ul>
-      {% else %}<p>No pairs configured.</p>{% endif %}
-      <p><a href="/">Back to dashboard</a></p>
-    </main>
-  </body>
-</html>
+{% extends "base.html" %}
+
+{% block title %}Playlist pairs{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero">
+  <div>
+    <p class="eyebrow">PAIR WORKSPACE</p>
+    <h1>Choose what stays in sync.</h1>
+    <p class="lede">Connect real accounts later, or load the local demo to test the full review-and-approve flow today.</p>
+  </div>
+  <div class="hero-orb orb-pink"></div>
+</section>
+
+<section class="grid two-up">
+  <article class="card accent-card">
+    <div class="card-heading"><span class="icon-bubble green">◉</span><div><h2>Instant demo</h2><p>Private, synthetic data. No network calls.</p></div></div>
+    <form method="post" action="/demo/seed"><button class="button primary" type="submit">Load demo workspace</button></form>
+    <div class="demo-actions">
+      <form method="post" action="/demo/change"><input type="hidden" name="change" value="source_add"><button class="button ghost" type="submit">Simulate source addition</button></form>
+      <form method="post" action="/demo/change"><input type="hidden" name="change" value="target_remove"><button class="button ghost danger-text" type="submit">Simulate target removal</button></form>
+      <form method="post" action="/demo/change"><input type="hidden" name="change" value="reset"><button class="button ghost" type="submit">Reset demo</button></form>
+    </div>
+  </article>
+
+  <article class="card">
+    <div class="card-heading"><span class="icon-bubble red">↔</span><div><h2>Real provider setup</h2><p>OAuth credentials stay local and encrypted.</p></div></div>
+    <div class="stack-actions">
+      <a class="button ghost" href="/auth/spotify/start">Connect Spotify</a>
+      <a class="button ghost" href="/auth/youtube_music/start">Connect YouTube Music</a>
+    </div>
+  </article>
+</section>
+
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">CONFIGURED PAIRS</p><h2>Synchronization pairs</h2></div><span class="pill">{{ pairs|length }} total</span></div>
+  {% if pairs %}
+  <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>Status</th><th></th></tr></thead><tbody>
+    {% for pair in pairs %}<tr><td><code>{{ pair.source_playlist_id }}</code></td><td><code>{{ pair.target_playlist_id }}</code></td><td><span class="status-dot active"></span> Ready for preview</td><td><a class="text-link" href="/sync/plan/{{ pair.id }}">Review plan →</a></td></tr>{% endfor %}
+  </tbody></table></div>
+  {% else %}<div class="empty-state"><span class="empty-icon">✦</span><h3>No pairs yet</h3><p>Load the demo workspace above to create a safe test pair.</p></div>{% endif %}
+</section>
+
+{% if playlist_options %}
+<section class="card">
+  <div class="section-heading"><div><p class="eyebrow">MANUAL PAIRING</p><h2>Create a playlist pair</h2></div></div>
+  <form class="pair-form" method="post" action="/pairs">
+    <label>Source playlist
+      <select name="source_selection" required>
+        <option value="">Select a source playlist</option>
+        {% for group in playlist_options %}{% for playlist in group.playlists %}<option value="{{ group.account.id }}|{{ playlist.provider_playlist_id }}">{{ group.account.provider_name }} · {{ playlist.name }}</option>{% endfor %}{% endfor %}
+      </select>
+    </label>
+    <label>Target playlist
+      <select name="target_selection" required>
+        <option value="">Select a target playlist</option>
+        {% for group in playlist_options %}{% for playlist in group.playlists %}<option value="{{ group.account.id }}|{{ playlist.provider_playlist_id }}">{{ group.account.provider_name }} · {{ playlist.name }}</option>{% endfor %}{% endfor %}
+      </select>
+    </label>
+    <button class="button primary" type="submit">Save pair</button>
+  </form>
+</section>
+{% endif %}
+{% endblock %}

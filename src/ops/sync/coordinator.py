@@ -35,7 +35,11 @@ class SyncCoordinator:
         self.session = session
         self.settings = settings
         self.provider_factory = provider_factory
-        self.cipher = CredentialCipher(settings.credential_encryption_key or "")
+        self.cipher = (
+            CredentialCipher(settings.credential_encryption_key)
+            if settings.credential_encryption_key
+            else None
+        )
 
     def _providers(
         self, pair: SyncPair
@@ -44,14 +48,50 @@ class SyncCoordinator:
         target_account = self.session.get(ProviderAccount, pair.target_account_id)
         if source_account is None or target_account is None:
             raise ValueError("sync pair references a missing provider account")
-        account_repo = ProviderAccountRepository(self.session, self.cipher)
-        source_provider = self.provider_factory(
-            source_account, account_repo.load_credentials(source_account)
-        )
-        target_provider = self.provider_factory(
-            target_account, account_repo.load_credentials(target_account)
-        )
+        if source_account.provider_name.startswith("demo_"):
+            source_credentials: dict[str, Any] = {}
+        elif self.cipher is None:
+            raise ValueError("credential encryption is not configured")
+        else:
+            source_credentials = ProviderAccountRepository(
+                self.session, self.cipher
+            ).load_credentials(source_account)
+        if target_account.provider_name.startswith("demo_"):
+            target_credentials: dict[str, Any] = {}
+        elif self.cipher is None:
+            raise ValueError("credential encryption is not configured")
+        else:
+            target_credentials = ProviderAccountRepository(
+                self.session, self.cipher
+            ).load_credentials(target_account)
+        source_provider = self.provider_factory(source_account, source_credentials)
+        target_provider = self.provider_factory(target_account, target_credentials)
         return source_provider, target_provider, source_account, target_account
+
+    def establish_baseline(self, pair: SyncPair) -> None:
+        """Record current provider state without changing either provider."""
+
+        source_provider, target_provider, _, _ = self._providers(pair)
+        source = PlaylistState.from_provider_playlist(
+            source_provider.get_playlist(pair.source_playlist_id)
+        )
+        target = PlaylistState.from_provider_playlist(
+            target_provider.get_playlist(pair.target_playlist_id)
+        )
+        baseline = SyncBaseline(
+            pair_id=pair.id,
+            account_id=pair.source_account_id,
+            playlist_key=f"{pair.source_playlist_id}:{pair.target_playlist_id}",
+            source_provider=source.provider,
+            target_provider=target.provider,
+            snapshot_json=encode_baseline(BaselineState(source=source, target=target)),
+            synchronized_at=datetime.now().astimezone(),
+        )
+        SyncBaselineRepository(self.session).save(baseline)
+        run_repo = SyncRunRepository(self.session)
+        run = run_repo.start(baseline.id)
+        run_repo.finish(run, "baseline_established")
+        self.session.commit()
 
     def preview(self, pair: SyncPair) -> ReconciliationPlan:
         source_provider, target_provider, _, _ = self._providers(pair)

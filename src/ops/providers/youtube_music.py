@@ -1,4 +1,4 @@
-"""YouTube Music read-only provider adapter."""
+"""YouTube Music provider adapter backed by ytmusicapi."""
 
 from collections.abc import Sequence
 
@@ -8,7 +8,7 @@ from ops.providers.types import ProviderPlaylist, ProviderTrack
 
 
 class YouTubeMusicProvider:
-    """Read-only ytmusicapi adapter with an injectable client."""
+    """ytmusicapi adapter with an injectable client and guarded writes."""
 
     name = "youtube_music"
 

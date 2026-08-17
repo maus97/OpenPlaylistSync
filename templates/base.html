@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#121212">
+    <title>{% block title %}Open Playlist Sync{% endblock %} · OPS</title>
+    <link rel="stylesheet" href="/static/style.css">
+  </head>
+  <body>
+    <div class="app-shell">
+      <header class="topbar">
+        <a class="brand" href="/"><span class="brand-mark">↯</span><span>open<span class="brand-green">playlist</span><span class="brand-pink">sync</span></span></a>
+        <nav class="nav-links" aria-label="Primary navigation">
+          <a href="/pairs">Pairs</a>
+          <a href="/runs">Runs</a>
+          <a class="nav-cta" href="/pairs">Open workspace</a>
+        </nav>
+      </header>
+      <main class="page-shell">{% block content %}{% endblock %}</main>
+      <footer class="footer"><span>OPS · local by design</span><a href="/healthz">system health</a></footer>
+    </div>
+  </body>
+</html>

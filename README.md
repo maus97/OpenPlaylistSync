@@ -86,21 +86,22 @@ Implemented:
 - Pure three-way reconciliation plans with conflict and destructive-action
   safety checks.
 - Fernet credential encryption boundary and SQLAlchemy repositories.
-- Read-only provider adapters and operator-assisted authentication flows.
+- Provider adapters with guarded writes and operator-assisted authentication flows.
 - APScheduler lifecycle boundary and a server-rendered operator dashboard with
   playlist-pair configuration, plan review, and explicit approval flows.
+- Offline demo workspace for testing baseline creation, simulated additions and
+  removals, conflict review, and safe application without provider credentials.
 - Python packaging, pytest, Ruff, Docker, Compose, environment template, and
   GitHub Actions CI.
 
-Not implemented yet:
+Remaining for production hardening:
 
-- Provider playlist writes and synchronization execution.
+- Live provider end-to-end verification and rate-limit/retry tuning.
+- Track ordering, duplicate handling, and richer metadata reconciliation.
 - Credential key rotation and recovery workflow.
 
-## Next implementation milestone
+## Production setup
 
-The next milestone is the provider-neutral reconciliation engine, followed by
-encrypted credential storage and read-only provider adapters. Live provider
-authentication requires operator-created OAuth applications and credentials;
-those values belong in a local secret manager or ignored `.env` file, never in
-Git.
+For immediate testing, open `/` and choose **Try local demo**. For real
+providers, configure OAuth applications and credentials in a local secret
+manager or ignored `.env` file; never commit them to Git.

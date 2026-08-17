@@ -1,18 +1,20 @@
 """HTTP routes for health, operator flows, and the safety-first UI."""
 
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
 from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings, get_settings
 from ops.db import get_db
-from ops.models import ProviderAccount, SyncPair
+from ops.models import ProviderAccount, SyncBaseline, SyncPair, SyncRun
+from ops.providers.demo import mutate_demo_state, reset_demo_state
 from ops.providers.factory import create_provider
 from ops.security.crypto import CredentialCipher, CredentialEncryptionError
 from ops.storage.repositories import (
@@ -29,6 +31,18 @@ templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[3] / 
 
 def settings() -> Settings:
     return get_settings()
+
+
+def provider_for_account(session: Session, app_settings: Settings, account: ProviderAccount) -> Any:
+    """Build a provider for UI discovery without exposing credential payloads."""
+
+    if account.provider_name.startswith("demo_"):
+        return create_provider(account, {})
+    if not app_settings.credential_encryption_key:
+        raise ValueError("credential encryption is not configured")
+    cipher = CredentialCipher(app_settings.credential_encryption_key)
+    credentials = ProviderAccountRepository(session, cipher).load_credentials(account)
+    return create_provider(account, credentials)
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -171,6 +185,59 @@ def youtube_music_complete(
     return {"status": "authenticated", "provider": "youtube_music", "account_id": "default"}
 
 
+@router.post("/demo/seed", response_class=RedirectResponse, include_in_schema=False)
+def seed_demo_data(session: Annotated[Session, Depends(get_db)]) -> RedirectResponse:
+    """Create local synthetic accounts and a pair for immediate GUI testing."""
+
+    reset_demo_state()
+    account_ids: dict[str, int] = {}
+    for provider_name in ("demo_spotify", "demo_youtube_music"):
+        account = session.scalar(
+            select(ProviderAccount).where(
+                ProviderAccount.provider_name == provider_name,
+                ProviderAccount.external_account_id == "local-demo-user",
+            )
+        )
+        if account is None:
+            account = ProviderAccount(
+                provider_name=provider_name,
+                external_account_id="local-demo-user",
+            )
+            session.add(account)
+            session.flush()
+        account_ids[provider_name] = account.id
+    pair_repo = SyncPairRepository(session)
+    demo_pair = next(
+        (
+            pair
+            for pair in pair_repo.all()
+            if pair.source_account_id == account_ids["demo_spotify"]
+            and pair.target_account_id == account_ids["demo_youtube_music"]
+        ),
+        None,
+    )
+    if demo_pair is None:
+        demo_pair = SyncPair(
+            source_account_id=account_ids["demo_spotify"],
+            target_account_id=account_ids["demo_youtube_music"],
+            source_playlist_id="spotify:demo-playlist",
+            target_playlist_id="youtube_music:demo-playlist",
+        )
+        session.add(demo_pair)
+        session.flush()
+    baseline_ids = select(SyncBaseline.id).where(SyncBaseline.pair_id == demo_pair.id)
+    session.execute(delete(SyncRun).where(SyncRun.baseline_id.in_(baseline_ids)))
+    session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == demo_pair.id))
+    session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/demo/change", response_class=RedirectResponse, include_in_schema=False)
+def change_demo_data(change: Annotated[str, Form()]) -> RedirectResponse:
+    mutate_demo_state(change)
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.get("/runs", response_class=HTMLResponse, include_in_schema=False)
 def recent_runs(
     request: Request,
@@ -182,23 +249,41 @@ def recent_runs(
 
 @router.get("/pairs", response_class=HTMLResponse, include_in_schema=False)
 def pairs(request: Request, session: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
-    accounts = list(session.query(ProviderAccount).order_by(ProviderAccount.id))
+    app_settings = get_settings()
+    accounts = list(session.scalars(select(ProviderAccount).order_by(ProviderAccount.id)))
+    playlist_options = []
+    for account in accounts:
+        try:
+            provider = provider_for_account(session, app_settings, account)
+            playlists = provider.list_playlists()
+        except Exception:
+            playlists = ()
+        playlist_options.append({"account": account, "playlists": playlists})
     configured_pairs = SyncPairRepository(session).all()
     return templates.TemplateResponse(
         request=request,
         name="pairs.html",
-        context={"accounts": accounts, "pairs": configured_pairs},
+        context={
+            "accounts": accounts,
+            "pairs": configured_pairs,
+            "playlist_options": playlist_options,
+        },
     )
 
 
 @router.post("/pairs", response_class=RedirectResponse, include_in_schema=False)
 def create_pair(
-    source_account_id: Annotated[int, Form()],
-    target_account_id: Annotated[int, Form()],
-    source_playlist_id: Annotated[str, Form()],
-    target_playlist_id: Annotated[str, Form()],
+    source_selection: Annotated[str, Form()],
+    target_selection: Annotated[str, Form()],
     session: Annotated[Session, Depends(get_db)],
 ) -> RedirectResponse:
+    try:
+        source_account_raw, source_playlist_id = source_selection.split("|", 1)
+        target_account_raw, target_playlist_id = target_selection.split("|", 1)
+        source_account_id = int(source_account_raw)
+        target_account_id = int(target_account_raw)
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid playlist selection") from exc
     if source_account_id == target_account_id:
         raise HTTPException(status_code=400, detail="source and target accounts must differ")
     source_account = session.get(ProviderAccount, source_account_id)
@@ -238,6 +323,22 @@ def sync_plan(
     )
 
 
+@router.post("/sync/baseline/{pair_id}", response_class=RedirectResponse, include_in_schema=False)
+def establish_sync_baseline(
+    pair_id: int,
+    app_settings: Annotated[Settings, Depends(settings)],
+    session: Annotated[Session, Depends(get_db)],
+) -> RedirectResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    try:
+        SyncCoordinator(session, app_settings, create_provider).establish_baseline(pair)
+    except (ValueError, CredentialEncryptionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)
+
+
 @router.post("/sync/apply/{pair_id}", response_class=HTMLResponse, include_in_schema=False)
 def apply_sync_plan(
     request: Request,
@@ -262,6 +363,8 @@ def apply_sync_plan(
         )
     except (ValueError, CredentialEncryptionError, DestructiveActionApprovalError) as exc:
         error = str(exc)
+    if error is None:
+        return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)
     return templates.TemplateResponse(
         request=request,
         name="sync_plan.html",

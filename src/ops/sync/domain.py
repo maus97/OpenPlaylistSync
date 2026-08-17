@@ -33,6 +33,7 @@ class TrackState:
     artists: tuple[str, ...]
     source_provider_track_id: str
     duration_ms: int | None = None
+    isrc: str | None = None
 
     @classmethod
     def from_provider_track(cls, track: ProviderTrack) -> "TrackState":
@@ -42,6 +43,7 @@ class TrackState:
             artists=track.artists,
             source_provider_track_id=track.provider_track_id,
             duration_ms=track.duration_ms,
+            isrc=track.isrc,
         )
 
 

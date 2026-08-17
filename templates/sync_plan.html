@@ -1,33 +1,17 @@
-<!doctype html>
-<html lang="en">
-  <head>
-    <meta charset="utf-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>Synchronization plan</title>
-  </head>
-  <body>
-    <main>
-      <h1>Synchronization plan</h1>
-      {% if error %}<p role="alert">{{ error }}</p>{% endif %}
-      {% if plan %}
-      {% if plan.initial_sync %}<p>This is the initial synchronization. Review and establish a baseline before applying changes.</p>{% endif %}
-      {% if plan.conflicts %}
-      <h2>Conflicts</h2>
-      <ul>{% for conflict in plan.conflicts %}<li>{{ conflict.track_key }}: {{ conflict.reason }}</li>{% endfor %}</ul>
-      {% endif %}
-      <h2>Actions</h2>
-      {% if plan.actions %}
-      <ul>{% for action in plan.actions %}<li>{{ action.action }} on {{ action.side }}: {{ action.track.title }}{% if action.destructive %} <strong>(destructive)</strong>{% endif %}</li>{% endfor %}</ul>
-      {% else %}<p>No actions proposed.</p>{% endif %}
-      {% if plan.safe_to_apply and plan.actions %}
-      <form method="post" action="/sync/apply/{{ pair.id }}">
-        <input type="hidden" name="fingerprint" value="{{ fingerprint }}">
-        {% if plan.requires_approval %}<label>Type <code>APPLY DESTRUCTIVE CHANGES</code> to confirm <input name="confirmation" required></label>{% endif %}
-        <button type="submit">Apply reviewed plan</button>
-      </form>
-      {% endif %}
-      {% endif %}
-      <p><a href="/pairs">Back to pairs</a></p>
-    </main>
-  </body>
-</html>
+{% extends "base.html" %}
+
+{% block title %}Sync plan{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero"><div><p class="eyebrow">PLAN REVIEW</p><h1>Make the next move deliberately.</h1><p class="lede">OPS compares both playlists against the last successful baseline. Nothing destructive happens without an explicit approval.</p></div><div class="hero-orb orb-pink" aria-hidden="true"></div></section>
+<section class="card">
+  {% if error %}<div class="alert">{{ error }}</div>{% endif %}
+  {% if plan %}
+    {% if plan.initial_sync %}<div class="alert">This is the first view of this pair. Establishing a baseline records the current state without changing either provider.</div>{% endif %}
+    {% if plan.conflicts %}<h2>Conflicts to resolve</h2><ul class="plan-list">{% for conflict in plan.conflicts %}<li><strong>{{ conflict.track_key }}</strong><br><span class="muted-copy">{{ conflict.reason }}</span></li>{% endfor %}</ul>{% endif %}
+    <h2 class="plan-heading">Proposed actions</h2>
+    {% if plan.actions %}<ul class="plan-list">{% for action in plan.actions %}<li><strong>{{ action.action }}</strong> on {{ action.side }} · {{ action.track.title }}{% if action.destructive %}<span class="danger-text"> · destructive</span>{% endif %}<br><span class="muted-copy">{{ action.reason }}</span></li>{% endfor %}</ul>{% else %}<div class="empty-state"><span class="empty-icon">✓</span><h3>No changes proposed</h3><p>The two sides are currently aligned, or this is the initial baseline view.</p></div>{% endif %}
+    {% if plan.initial_sync %}<form method="post" action="/sync/baseline/{{ pair.id }}"><button class="button primary" type="submit">Establish safe baseline</button></form>{% elif plan.safe_to_apply and plan.actions %}<form class="approval-form" method="post" action="/sync/apply/{{ pair.id }}"><input type="hidden" name="fingerprint" value="{{ fingerprint }}">{% if plan.requires_approval %}<label>Type <code>APPLY DESTRUCTIVE CHANGES</code> to confirm<input name="confirmation" required></label>{% endif %}<button class="button secondary" type="submit">Apply reviewed plan</button></form>{% endif %}
+  {% endif %}
+</section>
+{% endblock %}

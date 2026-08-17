@@ -1,4 +1,4 @@
-"""Spotify read-only provider adapter."""
+"""Spotify provider adapter with injectable HTTP transport."""
 
 from collections.abc import Sequence
 
@@ -8,7 +8,7 @@ from ops.providers.types import ProviderPlaylist, ProviderTrack
 
 
 class SpotifyProvider:
-    """Read-only Spotify adapter with an injectable HTTP client."""
+    """Spotify adapter with injectable HTTP transport and guarded writes."""
 
     name = "spotify"
 

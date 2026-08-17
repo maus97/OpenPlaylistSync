@@ -24,12 +24,12 @@ implemented.
 5. Keep credentials local, encrypted at rest, and absent from logs and source.
 6. Make provider behavior replaceable with fakes in tests.
 
-### Non-goals for this scaffold
+### Remaining non-goals for this milestone
 
 - Implementing Spotify OAuth.
 - Implementing YouTube Music authentication.
-- Calling either provider API.
-- Implementing playlist synchronization or a scheduler job.
+- Running unattended synchronization without operator approval.
+- Guaranteeing provider API behavior before live-account verification.
 - Adding telemetry, hosted services, or a cloud control plane.
 
 ## Component boundaries
@@ -62,10 +62,11 @@ provider-specific playlist and track representations into the neutral domain
 types. HTTP clients and authentication details stay here. The adapter boundary
 must accept injected clients or transport fakes.
 
-The current milestone contains operator-assisted authentication boundaries and
-read-only adapters for Spotify and YouTube Music. Playlist writes remain behind
-the safety executor and intentionally raise `NotImplementedError` until the
-reconciliation plan application path is complete.
+The current milestone contains operator-assisted authentication boundaries,
+read operations, and write operations for Spotify and YouTube Music. Writes are
+only reachable through the safety executor, which preflights the complete plan,
+rejects conflicts and stale fingerprints, and requires an explicit phrase for
+destructive actions.
 
 ### `src/ops/sync/`
 
@@ -90,6 +91,8 @@ partial updates rather than introducing a separate frontend build system.
 The current UI provides provider connection entry points, pair configuration,
 run history, and a synchronization-plan review screen. Applying a plan first
 re-fetches both provider playlists and rejects stale fingerprints.
+It also includes a local synthetic provider pair so the complete baseline,
+preview, approval, and application flow can be tested without network access.
 
 ## Provider-neutral contract
 

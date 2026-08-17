@@ -28,6 +28,7 @@ def _provider_track(track: TrackState) -> ProviderTrack:
         title=track.title,
         artists=track.artists,
         duration_ms=track.duration_ms,
+        isrc=track.isrc,
     )
 
 

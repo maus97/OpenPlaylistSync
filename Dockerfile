@@ -13,6 +13,7 @@ COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY templates ./templates
+COPY static ./static
 
 RUN pip install --no-cache-dir . \
     && mkdir -p /data \
