@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Synchronization runs</title>
+  </head>
+  <body>
+    <main>
+      <h1>Synchronization runs</h1>
+      {% if runs %}
+      <table>
+        <thead><tr><th>ID</th><th>Status</th><th>Started</th><th>Completed</th></tr></thead>
+        <tbody>
+        {% for run in runs %}
+          <tr><td>{{ run.id }}</td><td>{{ run.status }}</td><td>{{ run.started_at }}</td><td>{{ run.completed_at or "-" }}</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      {% else %}
+      <p>No synchronization runs have been recorded.</p>
+      {% endif %}
+      <p><a href="/">Back to dashboard</a></p>
+    </main>
+  </body>
+</html>

@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>{{ app_name }}</title>
+  </head>
+  <body>
+    <main>
+      <h1>{{ app_name }}</h1>
+      <p>Privacy-first, self-hosted playlist synchronization.</p>
+      <p>Environment: <strong>{{ environment }}</strong></p>
+      <nav aria-label="Application navigation">
+        <a href="/auth/spotify/start">Connect Spotify</a>
+        <a href="/auth/youtube_music/start">Connect YouTube Music</a>
+        <a href="/runs">View synchronization runs</a>
+      </nav>
+      <p>Synchronization is currently preview-only while provider writes and destructive approval are being completed.</p>
+    </main>
+  </body>
+</html>

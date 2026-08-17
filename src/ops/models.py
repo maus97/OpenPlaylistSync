@@ -1,0 +1,82 @@
+"""Initial persistence boundary for accounts, baselines, and run records."""
+
+from datetime import datetime
+
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint, func
+from sqlalchemy.orm import Mapped, mapped_column
+
+from ops.db import Base
+
+
+class ProviderAccount(Base):
+    """A provider account with ciphertext-only credential storage."""
+
+    __tablename__ = "provider_accounts"
+    __table_args__ = (UniqueConstraint("provider_name", "external_account_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    external_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    credentials_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
+    credential_key_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SyncPair(Base):
+    """The two provider accounts and playlist IDs participating in a sync."""
+
+    __tablename__ = "sync_pairs"
+    __table_args__ = (
+        UniqueConstraint(
+            "source_account_id",
+            "target_account_id",
+            "source_playlist_id",
+            "target_playlist_id",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    source_account_id: Mapped[int] = mapped_column(
+        ForeignKey("provider_accounts.id"), nullable=False
+    )
+    target_account_id: Mapped[int] = mapped_column(
+        ForeignKey("provider_accounts.id"), nullable=False
+    )
+    source_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    target_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class SyncBaseline(Base):
+    """The last successful normalized snapshot for a synchronization pair."""
+
+    __tablename__ = "sync_baselines"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pair_id: Mapped[int | None] = mapped_column(ForeignKey("sync_pairs.id"), nullable=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), nullable=False)
+    playlist_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    source_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    target_provider: Mapped[str] = mapped_column(String(64), nullable=False)
+    snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class SyncRun(Base):
+    """An attempt to plan or apply synchronization changes."""
+
+    __tablename__ = "sync_runs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    baseline_id: Mapped[int | None] = mapped_column(ForeignKey("sync_baselines.id"), nullable=True)
+    status: Mapped[str] = mapped_column(String(32), nullable=False)
+    summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

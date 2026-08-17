@@ -1,0 +1,63 @@
+"""FastAPI application entry point."""
+
+from contextlib import asynccontextmanager
+
+import uvicorn
+from fastapi import FastAPI
+from starlette.middleware.sessions import SessionMiddleware
+
+from ops import __version__
+from ops.api.routes import router
+from ops.config import get_settings
+from ops.db import SessionLocal
+from ops.providers.factory import create_provider
+from ops.scheduler import SchedulerService
+from ops.storage.repositories import SyncPairRepository
+from ops.sync.coordinator import SyncCoordinator
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    scheduler = SchedulerService(get_settings(), sync_job=run_scheduled_sync)
+    scheduler.start()
+    app.state.scheduler = scheduler
+    try:
+        yield
+    finally:
+        scheduler.shutdown()
+
+
+def run_scheduled_sync() -> None:
+    """Create safe preview plans for enabled pairs; never apply writes automatically."""
+
+    settings = get_settings()
+    if not settings.credential_encryption_key:
+        return
+    with SessionLocal() as session:
+        coordinator = SyncCoordinator(session, settings, create_provider)
+        for pair in SyncPairRepository(session).get_enabled():
+            coordinator.preview(pair)
+
+
+def create_app() -> FastAPI:
+    """Create the FastAPI application."""
+
+    settings = get_settings()
+    app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
+    if settings.session_secret:
+        app.add_middleware(
+            SessionMiddleware,
+            secret_key=settings.session_secret,
+            https_only=settings.environment == "production",
+        )
+    app.include_router(router)
+    return app
+
+
+app = create_app()
+
+
+def main() -> None:
+    """Run the development/standalone server."""
+
+    uvicorn.run("ops.main:app", host="0.0.0.0", port=8000)

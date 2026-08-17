@@ -1,0 +1,50 @@
+[build-system]
+requires = ["setuptools>=75", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "open-playlist-sync"
+version = "0.1.0"
+description = "Privacy-first, self-hosted bidirectional playlist synchronization."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "alembic>=1.14,<2",
+    "apscheduler>=3.10,<4",
+    "authlib>=1.3,<2",
+    "cryptography>=43,<50",
+    "fastapi>=0.115,<1",
+    "httpx>=0.27,<1",
+    "itsdangerous>=2.2,<3",
+    "jinja2>=3.1,<4",
+    "pydantic-settings>=2.6,<3",
+    "sqlalchemy>=2.0,<3",
+    "uvicorn[standard]>=0.34,<1",
+    "ytmusicapi>=1.11,<2",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3,<9",
+    "pytest-asyncio>=0.25,<2",
+    "pytest-cov>=6,<7",
+    "ruff>=0.9,<1",
+]
+
+[project.scripts]
+ops = "ops.main:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = ["--strict-config", "--strict-markers", "-ra"]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["B", "E", "F", "I", "UP"]

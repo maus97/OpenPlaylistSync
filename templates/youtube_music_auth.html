@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>YouTube Music authorization</title>
+  </head>
+  <body>
+    <main>
+      <h1>Authorize YouTube Music</h1>
+      <p>Open the verification page, complete authorization, then return here.</p>
+      <p><a href="{{ auth_code.verification_url }}" target="_blank" rel="noreferrer">Open verification page</a></p>
+      <p>Your user code is <strong>{{ auth_code.user_code }}</strong>.</p>
+      <p><a href="/auth/youtube_music/complete">I completed authorization</a></p>
+    </main>
+  </body>
+</html>

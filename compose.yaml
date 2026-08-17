@@ -1,0 +1,28 @@
+services:
+  ops:
+    build: .
+    image: open-playlist-sync:local
+    ports:
+      - "8000:8000"
+    environment:
+      OPS_ENVIRONMENT: production
+      OPS_DATABASE_URL: sqlite:////data/ops.db
+      OPS_LOG_LEVEL: INFO
+      OPS_CREDENTIAL_ENCRYPTION_KEY: ""
+    volumes:
+      - ops-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - >-
+          import urllib.request;
+          urllib.request.urlopen('http://127.0.0.1:8000/healthz', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  ops-data:
