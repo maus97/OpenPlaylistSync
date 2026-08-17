@@ -4,9 +4,11 @@ from typing import Any
 
 from ytmusicapi import OAuthCredentials
 
+YOUTUBE_MUSIC_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
+
 
 class YouTubeMusicAuthService:
-    """Wrap ytmusicapi's operator-assisted OAuth flow."""
+    """Wrap ytmusicapi's read/write OAuth flow for YouTube Music."""
 
     def __init__(self, client_id: str, client_secret: str) -> None:
         self.credentials = OAuthCredentials(client_id, client_secret)

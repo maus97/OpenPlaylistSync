@@ -1,8 +1,9 @@
 """YouTube Music provider adapter backed by ytmusicapi."""
 
 from collections.abc import Sequence
+from typing import Any
 
-from ytmusicapi import YTMusic
+from ytmusicapi import OAuthCredentials, YTMusic
 
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
@@ -12,8 +13,21 @@ class YouTubeMusicProvider:
 
     name = "youtube_music"
 
-    def __init__(self, auth: str | dict | None = None, client: YTMusic | None = None) -> None:
-        self.client = client or YTMusic(auth=auth)
+    def __init__(
+        self,
+        auth: str | dict[str, Any] | None = None,
+        client: YTMusic | None = None,
+        oauth_client_id: str | None = None,
+        oauth_client_secret: str | None = None,
+    ) -> None:
+        oauth_credentials = None
+        if oauth_client_id or oauth_client_secret:
+            if not oauth_client_id or not oauth_client_secret:
+                raise ValueError(
+                    "YouTube Music OAuth client ID and secret must be configured together"
+                )
+            oauth_credentials = OAuthCredentials(oauth_client_id, oauth_client_secret)
+        self.client = client or YTMusic(auth=auth, oauth_credentials=oauth_credentials)
 
     def list_playlists(self) -> Sequence[ProviderPlaylist]:
         return tuple(

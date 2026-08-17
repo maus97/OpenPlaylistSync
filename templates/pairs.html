@@ -25,10 +25,16 @@
 
   <article class="card">
     <div class="card-heading"><span class="icon-bubble red">↔</span><div><h2>Real provider setup</h2><p>OAuth credentials stay local and encrypted.</p></div></div>
+    {% if connection_message %}<div class="success-alert">{{ connection_message }}</div>{% endif %}
+    <div class="provider-status"><span class="status-dot {{ 'active' if connection_status.spotify else 'inactive' }}"></span> Spotify: {{ 'ready to connect' if connection_status.spotify else 'configure .env first' }}</div>
     <div class="stack-actions">
       <a class="button ghost" href="/auth/spotify/start">Connect Spotify</a>
+    </div>
+    <div class="provider-status"><span class="status-dot {{ 'active' if connection_status.youtube_music else 'inactive' }}"></span> YouTube Music: {{ 'ready to connect' if connection_status.youtube_music else 'configure .env first' }}</div>
+    <div class="stack-actions">
       <a class="button ghost" href="/auth/youtube_music/start">Connect YouTube Music</a>
     </div>
+    {% if not connection_status.spotify or not connection_status.youtube_music %}<p class="muted-copy setup-hint">Set the provider client IDs/secrets, session secret, and encryption key in <code>.env</code>, then restart OPS.</p>{% endif %}
   </article>
 </section>
 

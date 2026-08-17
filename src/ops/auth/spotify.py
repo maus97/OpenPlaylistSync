@@ -9,7 +9,10 @@ from authlib.common.security import generate_token
 
 SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
-SPOTIFY_SCOPES = "playlist-read-private playlist-read-collaborative"
+SPOTIFY_SCOPES = (
+    "playlist-read-private playlist-read-collaborative "
+    "playlist-modify-private playlist-modify-public"
+)
 
 
 @dataclass(frozen=True, slots=True)

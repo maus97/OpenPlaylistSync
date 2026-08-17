@@ -60,7 +60,11 @@ def create_app() -> FastAPI:
         app.add_middleware(
             SessionMiddleware,
             secret_key=settings.session_secret,
-            https_only=settings.environment == "production",
+            https_only=(
+                settings.session_cookie_secure
+                if settings.session_cookie_secure is not None
+                else settings.environment == "production"
+            ),
         )
     app.include_router(router)
     return app

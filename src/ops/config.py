@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     credential_encryption_key: str | None = None
     session_secret: str | None = None
+    session_cookie_secure: bool | None = None
     scheduler_enabled: bool = False
     sync_interval_minutes: int = 60
     spotify_client_id: str | None = None

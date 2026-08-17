@@ -64,9 +64,28 @@ class SyncCoordinator:
             target_credentials = ProviderAccountRepository(
                 self.session, self.cipher
             ).load_credentials(target_account)
+        source_credentials = self._add_provider_runtime_credentials(
+            source_account, source_credentials
+        )
+        target_credentials = self._add_provider_runtime_credentials(
+            target_account, target_credentials
+        )
         source_provider = self.provider_factory(source_account, source_credentials)
         target_provider = self.provider_factory(target_account, target_credentials)
         return source_provider, target_provider, source_account, target_account
+
+    def _add_provider_runtime_credentials(
+        self, account: ProviderAccount, credentials: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Add non-persisted provider client settings needed for token refresh."""
+
+        if account.provider_name != "youtube_music":
+            return credentials
+        return {
+            **credentials,
+            "_oauth_client_id": self.settings.ytmusic_client_id,
+            "_oauth_client_secret": self.settings.ytmusic_client_secret,
+        }
 
     def establish_baseline(self, pair: SyncPair) -> None:
         """Record current provider state without changing either provider."""

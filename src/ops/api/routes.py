@@ -47,6 +47,12 @@ def provider_for_account(session: Session, app_settings: Settings, account: Prov
         raise ValueError("credential encryption is not configured")
     cipher = CredentialCipher(app_settings.credential_encryption_key)
     credentials = ProviderAccountRepository(session, cipher).load_credentials(account)
+    if account.provider_name == "youtube_music":
+        credentials = {
+            **credentials,
+            "_oauth_client_id": app_settings.ytmusic_client_id,
+            "_oauth_client_secret": app_settings.ytmusic_client_secret,
+        }
     return create_provider(account, credentials)
 
 
@@ -97,7 +103,7 @@ def spotify_callback(
     state: str,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
-) -> dict[str, str]:
+) -> RedirectResponse:
     expected_state = request.session.pop("spotify_oauth_state", None)
     if not expected_state or state != expected_state:
         raise HTTPException(status_code=400, detail="invalid Spotify OAuth state")
@@ -126,7 +132,7 @@ def spotify_callback(
         account = ProviderAccount(provider_name="spotify", external_account_id=profile["id"])
     account_repo.save_credentials(account, token)
     session.commit()
-    return {"status": "authenticated", "provider": "spotify", "account_id": profile["id"]}
+    return RedirectResponse("/pairs?connected=spotify", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/auth/youtube_music/start", response_class=HTMLResponse, include_in_schema=False)
@@ -160,7 +166,7 @@ def youtube_music_complete(
     request: Request,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
-) -> dict[str, str]:
+) -> RedirectResponse:
     device_code = request.session.pop("ytmusic_device_code", None)
     if not device_code:
         raise HTTPException(status_code=400, detail="no pending YouTube Music authorization")
@@ -187,7 +193,7 @@ def youtube_music_complete(
         account = ProviderAccount(provider_name="youtube_music", external_account_id="default")
     account_repo.save_credentials(account, token)
     session.commit()
-    return {"status": "authenticated", "provider": "youtube_music", "account_id": "default"}
+    return RedirectResponse("/pairs?connected=youtube_music", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/demo/seed", response_class=RedirectResponse, include_in_schema=False)
@@ -253,9 +259,35 @@ def recent_runs(
 
 
 @router.get("/pairs", response_class=HTMLResponse, include_in_schema=False)
-def pairs(request: Request, session: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
+def pairs(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    connected: str | None = None,
+) -> HTMLResponse:
     app_settings = get_settings()
     accounts = list(session.scalars(select(ProviderAccount).order_by(ProviderAccount.id)))
+    connection_status = {
+        "spotify": all(
+            (
+                app_settings.session_secret,
+                app_settings.credential_encryption_key,
+                app_settings.spotify_client_id,
+                app_settings.spotify_client_secret,
+            )
+        ),
+        "youtube_music": all(
+            (
+                app_settings.session_secret,
+                app_settings.credential_encryption_key,
+                app_settings.ytmusic_client_id,
+                app_settings.ytmusic_client_secret,
+            )
+        ),
+    }
+    connection_message = {
+        "spotify": "Spotify connected. Choose playlists below to create a pair.",
+        "youtube_music": "YouTube Music connected. Choose playlists below to create a pair.",
+    }.get(connected)
     playlist_options = []
     for account in accounts:
         try:
@@ -272,6 +304,8 @@ def pairs(request: Request, session: Annotated[Session, Depends(get_db)]) -> HTM
             "accounts": accounts,
             "pairs": configured_pairs,
             "playlist_options": playlist_options,
+            "connection_status": connection_status,
+            "connection_message": connection_message,
         },
     )
 

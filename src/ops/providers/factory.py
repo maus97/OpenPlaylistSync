@@ -14,7 +14,11 @@ def create_provider(account: ProviderAccount, credentials: dict[str, Any]) -> ob
     if account.provider_name == "spotify":
         return SpotifyProvider(access_token=credentials.get("access_token"))
     if account.provider_name == "youtube_music":
-        return YouTubeMusicProvider(auth=credentials)
+        return YouTubeMusicProvider(
+            auth=credentials,
+            oauth_client_id=credentials.get("_oauth_client_id"),
+            oauth_client_secret=credentials.get("_oauth_client_secret"),
+        )
     if account.provider_name == "demo_spotify":
         return DemoProvider("spotify")
     if account.provider_name == "demo_youtube_music":
