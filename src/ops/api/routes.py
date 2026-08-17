@@ -3,7 +3,7 @@
 from pathlib import Path
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy.orm import Session
@@ -12,9 +12,16 @@ from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
 from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings, get_settings
 from ops.db import get_db
-from ops.models import ProviderAccount
-from ops.security.crypto import CredentialCipher
-from ops.storage.repositories import ProviderAccountRepository, SyncRunRepository
+from ops.models import ProviderAccount, SyncPair
+from ops.providers.factory import create_provider
+from ops.security.crypto import CredentialCipher, CredentialEncryptionError
+from ops.storage.repositories import (
+    ProviderAccountRepository,
+    SyncPairRepository,
+    SyncRunRepository,
+)
+from ops.sync.coordinator import SyncCoordinator
+from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 
 router = APIRouter()
 templates = Jinja2Templates(directory=str(Path(__file__).resolve().parents[3] / "templates"))
@@ -171,3 +178,97 @@ def recent_runs(
 ) -> HTMLResponse:
     runs = SyncRunRepository(session).recent()
     return templates.TemplateResponse(request=request, name="runs.html", context={"runs": runs})
+
+
+@router.get("/pairs", response_class=HTMLResponse, include_in_schema=False)
+def pairs(request: Request, session: Annotated[Session, Depends(get_db)]) -> HTMLResponse:
+    accounts = list(session.query(ProviderAccount).order_by(ProviderAccount.id))
+    configured_pairs = SyncPairRepository(session).all()
+    return templates.TemplateResponse(
+        request=request,
+        name="pairs.html",
+        context={"accounts": accounts, "pairs": configured_pairs},
+    )
+
+
+@router.post("/pairs", response_class=RedirectResponse, include_in_schema=False)
+def create_pair(
+    source_account_id: Annotated[int, Form()],
+    target_account_id: Annotated[int, Form()],
+    source_playlist_id: Annotated[str, Form()],
+    target_playlist_id: Annotated[str, Form()],
+    session: Annotated[Session, Depends(get_db)],
+) -> RedirectResponse:
+    if source_account_id == target_account_id:
+        raise HTTPException(status_code=400, detail="source and target accounts must differ")
+    source_account = session.get(ProviderAccount, source_account_id)
+    target_account = session.get(ProviderAccount, target_account_id)
+    if source_account is None or target_account is None:
+        raise HTTPException(status_code=404, detail="provider account not found")
+    session.add(
+        SyncPair(
+            source_account_id=source_account_id,
+            target_account_id=target_account_id,
+            source_playlist_id=source_playlist_id,
+            target_playlist_id=target_playlist_id,
+        )
+    )
+    session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/sync/plan/{pair_id}", response_class=HTMLResponse, include_in_schema=False)
+def sync_plan(
+    request: Request,
+    pair_id: int,
+    app_settings: Annotated[Settings, Depends(settings)],
+    session: Annotated[Session, Depends(get_db)],
+) -> HTMLResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    try:
+        plan = SyncCoordinator(session, app_settings, create_provider).preview(pair)
+    except (ValueError, CredentialEncryptionError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return templates.TemplateResponse(
+        request=request,
+        name="sync_plan.html",
+        context={"pair": pair, "plan": plan, "fingerprint": plan_fingerprint(plan), "error": None},
+    )
+
+
+@router.post("/sync/apply/{pair_id}", response_class=HTMLResponse, include_in_schema=False)
+def apply_sync_plan(
+    request: Request,
+    pair_id: int,
+    app_settings: Annotated[Settings, Depends(settings)],
+    session: Annotated[Session, Depends(get_db)],
+    confirmation: Annotated[str, Form()] = "",
+    fingerprint: Annotated[str, Form()] = "",
+) -> HTMLResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    plan = None
+    error = None
+    try:
+        coordinator = SyncCoordinator(session, app_settings, create_provider)
+        plan = coordinator.preview(pair)
+        coordinator.apply(
+            pair,
+            plan,
+            Approval(plan_fingerprint=fingerprint, confirmation=confirmation),
+        )
+    except (ValueError, CredentialEncryptionError, DestructiveActionApprovalError) as exc:
+        error = str(exc)
+    return templates.TemplateResponse(
+        request=request,
+        name="sync_plan.html",
+        context={
+            "pair": pair,
+            "plan": plan,
+            "fingerprint": fingerprint,
+            "error": error,
+        },
+    )

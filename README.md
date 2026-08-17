@@ -87,7 +87,8 @@ Implemented:
   safety checks.
 - Fernet credential encryption boundary and SQLAlchemy repositories.
 - Read-only provider adapters and operator-assisted authentication flows.
-- APScheduler lifecycle boundary and a server-rendered operator dashboard.
+- APScheduler lifecycle boundary and a server-rendered operator dashboard with
+  playlist-pair configuration, plan review, and explicit approval flows.
 - Python packaging, pytest, Ruff, Docker, Compose, environment template, and
   GitHub Actions CI.
 

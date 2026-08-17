@@ -87,6 +87,9 @@ with a local file or a Docker volume.
 
 The UI will be server-rendered with Jinja2. HTMX should be used for focused
 partial updates rather than introducing a separate frontend build system.
+The current UI provides provider connection entry points, pair configuration,
+run history, and a synchronization-plan review screen. Applying a plan first
+re-fetches both provider playlists and rejects stale fingerprints.
 
 ## Provider-neutral contract
 

@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Playlist pairs</title>
+  </head>
+  <body>
+    <main>
+      <h1>Playlist pairs</h1>
+      <p>Use provider-prefixed playlist IDs, for example <code>spotify:playlist-id</code>.</p>
+      {% if accounts %}
+      <form method="post" action="/pairs">
+        <label>Source account
+          <select name="source_account_id" required>
+          {% for account in accounts %}<option value="{{ account.id }}">{{ account.id }}: {{ account.provider_name }} / {{ account.external_account_id }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Target account
+          <select name="target_account_id" required>
+          {% for account in accounts %}<option value="{{ account.id }}">{{ account.id }}: {{ account.provider_name }} / {{ account.external_account_id }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>Source playlist ID <input name="source_playlist_id" required></label>
+        <label>Target playlist ID <input name="target_playlist_id" required></label>
+        <button type="submit">Save pair</button>
+      </form>
+      {% else %}
+      <p>Connect a provider account before creating a pair.</p>
+      {% endif %}
+      <h2>Configured pairs</h2>
+      {% if pairs %}
+      <ul>{% for pair in pairs %}<li><a href="/sync/plan/{{ pair.id }}">Pair {{ pair.id }}</a>: {{ pair.source_playlist_id }} → {{ pair.target_playlist_id }}</li>{% endfor %}</ul>
+      {% else %}<p>No pairs configured.</p>{% endif %}
+      <p><a href="/">Back to dashboard</a></p>
+    </main>
+  </body>
+</html>

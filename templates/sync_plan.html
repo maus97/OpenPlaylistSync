@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Synchronization plan</title>
+  </head>
+  <body>
+    <main>
+      <h1>Synchronization plan</h1>
+      {% if error %}<p role="alert">{{ error }}</p>{% endif %}
+      {% if plan %}
+      {% if plan.initial_sync %}<p>This is the initial synchronization. Review and establish a baseline before applying changes.</p>{% endif %}
+      {% if plan.conflicts %}
+      <h2>Conflicts</h2>
+      <ul>{% for conflict in plan.conflicts %}<li>{{ conflict.track_key }}: {{ conflict.reason }}</li>{% endfor %}</ul>
+      {% endif %}
+      <h2>Actions</h2>
+      {% if plan.actions %}
+      <ul>{% for action in plan.actions %}<li>{{ action.action }} on {{ action.side }}: {{ action.track.title }}{% if action.destructive %} <strong>(destructive)</strong>{% endif %}</li>{% endfor %}</ul>
+      {% else %}<p>No actions proposed.</p>{% endif %}
+      {% if plan.safe_to_apply and plan.actions %}
+      <form method="post" action="/sync/apply/{{ pair.id }}">
+        <input type="hidden" name="fingerprint" value="{{ fingerprint }}">
+        {% if plan.requires_approval %}<label>Type <code>APPLY DESTRUCTIVE CHANGES</code> to confirm <input name="confirmation" required></label>{% endif %}
+        <button type="submit">Apply reviewed plan</button>
+      </form>
+      {% endif %}
+      {% endif %}
+      <p><a href="/pairs">Back to pairs</a></p>
+    </main>
+  </body>
+</html>

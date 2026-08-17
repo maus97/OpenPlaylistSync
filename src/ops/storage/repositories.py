@@ -59,6 +59,13 @@ class SyncPairRepository:
         statement = select(SyncPair).where(SyncPair.enabled.is_(True)).order_by(SyncPair.id)
         return list(self.session.scalars(statement))
 
+    def get(self, pair_id: int) -> SyncPair | None:
+        return self.session.get(SyncPair, pair_id)
+
+    def all(self) -> list[SyncPair]:
+        statement = select(SyncPair).order_by(SyncPair.id)
+        return list(self.session.scalars(statement))
+
     def save(self, pair: SyncPair) -> SyncPair:
         self.session.add(pair)
         self.session.flush()
