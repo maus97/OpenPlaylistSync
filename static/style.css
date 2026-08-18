@@ -91,6 +91,16 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
 .field-note { color: var(--green-soft); font-size: .7rem; font-weight: 800; margin-left: 5px; text-transform: uppercase; }
 .field-help { color: var(--dim); font-size: .78rem; line-height: 1.5; margin: 12px 0 0; }
 .page-alert { margin-bottom: 18px; }
+.setup-guide { background: linear-gradient(145deg, rgba(30,215,96,.09), rgba(255,61,129,.07) 55%, rgba(255,255,255,.02)); }
+.guide-grid { display: grid; gap: 18px; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.guide-step { background: rgba(0,0,0,.16); border: 1px solid var(--line); border-radius: 16px; padding: 20px; }
+.guide-step h3 { margin: 4px 0 14px; }
+.guide-number { align-items: center; background: rgba(30,215,96,.16); border-radius: 999px; color: var(--green-soft); display: inline-flex; font-size: .72rem; font-weight: 900; height: 30px; justify-content: center; letter-spacing: .08em; width: 30px; }
+.guide-number-pink { background: rgba(255,61,129,.16); color: #ffb2cb; }
+.setup-list { color: var(--muted); display: grid; gap: 9px; line-height: 1.55; margin: 0; padding-left: 20px; }
+.setup-list strong { color: var(--ink); }
+.scope-callout { align-items: center; background: rgba(255,255,255,.04); border: 1px solid var(--line); border-radius: 13px; color: var(--muted); display: flex; flex-wrap: wrap; gap: 10px 18px; margin-top: 18px; padding: 14px 16px; }
+.scope-callout strong { color: var(--ink); }
 .footer { color: var(--dim); display: flex; font-size: .75rem; justify-content: space-between; margin: 0 auto; max-width: 1180px; padding: 0 32px 30px; }
 .footer a { color: var(--muted); }
 .alert { background: rgba(255,0,51,.12); border: 1px solid rgba(255,0,51,.28); border-radius: 13px; color: #ffb2c2; padding: 13px 15px; }
@@ -104,6 +114,6 @@ input, select { background: var(--panel-2); border: 1px solid var(--line); borde
   .nav-links a:not(.nav-cta) { display: none; }
   .hero { min-height: 280px; }
   .hero-orb { height: 150px; opacity: .45; right: -15px; width: 150px; }
-  .two-up, .pair-form { grid-template-columns: 1fr; }
+  .two-up, .guide-grid, .pair-form { grid-template-columns: 1fr; }
   .footer { padding-left: 18px; padding-right: 18px; }
 }

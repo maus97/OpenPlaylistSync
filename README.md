@@ -112,3 +112,43 @@ file is intended for deployment overrides, not normal operator setup.
 After saving settings, open `/pairs`, connect Spotify and YouTube Music, choose
 playlists, and establish the first non-destructive baseline. Review each later
 plan before applying it.
+
+### Provider access setup
+
+The same instructions are available in the **Settings** page. No provider
+passwords are entered into OPS; the provider authorization pages handle account
+approval.
+
+#### Spotify
+
+1. Open the [Spotify Developer Dashboard](https://developer.spotify.com/dashboard)
+   and create an app.
+2. In the app settings, add this exact redirect URI:
+   `http://127.0.0.1:8000/auth/spotify/callback`.
+3. Copy the app's Client ID and Client Secret into OPS Settings.
+4. Save the settings, open Pairs, choose **Connect Spotify**, and approve the
+   requested access.
+
+OPS requests `playlist-read-private`, `playlist-read-collaborative`,
+`playlist-modify-private`, and `playlist-modify-public` so it can read and
+write private, public, and collaborative playlists. Spotify requires the
+loopback URI to match exactly and uses `127.0.0.1`, not `localhost`; see the
+[redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
+and [playlist scopes](https://developer.spotify.com/documentation/web-api/concepts/scopes).
+
+#### YouTube Music
+
+1. In [Google Cloud Console](https://console.cloud.google.com/projectcreate),
+   create or select a project.
+2. Enable [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
+3. In [Credentials](https://console.cloud.google.com/apis/credentials), create
+   an OAuth client ID and choose **TVs and Limited Input devices**.
+4. Copy the client ID and secret into OPS Settings and save.
+5. Open Pairs and choose **Connect YouTube Music**. OPS will show a Google
+   verification URL and one-time code. Complete the approval, return to OPS,
+   and choose **I completed authorization**.
+
+This follows the [ytmusicapi OAuth setup](https://ytmusicapi.readthedocs.io/en/latest/setup/oauth.html)
+and uses its `https://www.googleapis.com/auth/youtube` read/write scope. Google
+Cloud's [authorization credential guide](https://developers.google.com/youtube/registering_an_application)
+explains the OAuth credential types.
