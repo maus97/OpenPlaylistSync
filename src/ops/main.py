@@ -12,6 +12,7 @@ from starlette.middleware.sessions import SessionMiddleware
 from ops import __version__
 from ops.api.routes import router
 from ops.config import get_settings
+from ops.configuration import load_app_settings
 from ops.db import SessionLocal
 from ops.providers.factory import create_provider
 from ops.scheduler import SchedulerService
@@ -33,10 +34,10 @@ async def lifespan(app: FastAPI):
 def run_scheduled_sync() -> None:
     """Create safe preview plans for enabled pairs; never apply writes automatically."""
 
-    settings = get_settings()
-    if not settings.credential_encryption_key:
-        return
     with SessionLocal() as session:
+        settings = load_app_settings(session)
+        if not settings.credential_encryption_key:
+            return
         coordinator = SyncCoordinator(session, settings, create_provider)
         for pair in SyncPairRepository(session).get_enabled():
             coordinator.preview(pair)

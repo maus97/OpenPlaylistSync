@@ -25,6 +25,19 @@ class ProviderAccount(Base):
     )
 
 
+class AppConfiguration(Base):
+    """Encrypted operator configuration managed through the local UI."""
+
+    __tablename__ = "app_configuration"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    settings_ciphertext: Mapped[str] = mapped_column(Text, nullable=False)
+    credential_key_id: Mapped[str] = mapped_column(String(128), nullable=False, default="primary")
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SyncPair(Base):
     """The two provider accounts and playlist IDs participating in a sync."""
 

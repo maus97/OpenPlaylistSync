@@ -86,6 +86,11 @@ td code, code { background: rgba(255,255,255,.06); border-radius: 6px; color: va
 .pair-form { align-items: end; display: grid; gap: 14px; grid-template-columns: 1fr 1fr auto; }
 label { color: var(--muted); display: grid; font-size: .78rem; font-weight: 700; gap: 8px; }
 input, select { background: var(--panel-2); border: 1px solid var(--line); border-radius: 11px; color: var(--ink); min-height: 44px; padding: 10px 12px; width: 100%; }
+.checkbox-label { align-items: center; display: flex; gap: 9px; margin: 14px 0; }
+.checkbox-label input { accent-color: var(--green); min-height: auto; width: auto; }
+.field-note { color: var(--green-soft); font-size: .7rem; font-weight: 800; margin-left: 5px; text-transform: uppercase; }
+.field-help { color: var(--dim); font-size: .78rem; line-height: 1.5; margin: 12px 0 0; }
+.page-alert { margin-bottom: 18px; }
 .footer { color: var(--dim); display: flex; font-size: .75rem; justify-content: space-between; margin: 0 auto; max-width: 1180px; padding: 0 32px 30px; }
 .footer a { color: var(--muted); }
 .alert { background: rgba(255,0,51,.12); border: 1px solid rgba(255,0,51,.28); border-radius: 13px; color: #ffb2c2; padding: 13px 15px; }

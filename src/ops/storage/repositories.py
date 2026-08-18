@@ -7,7 +7,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ops.models import ProviderAccount, SyncBaseline, SyncPair, SyncRun
+from ops.models import AppConfiguration, ProviderAccount, SyncBaseline, SyncPair, SyncRun
 from ops.security.crypto import CredentialCipher
 
 
@@ -47,6 +47,32 @@ class ProviderAccountRepository:
         if not account.credentials_ciphertext:
             return {}
         return self.cipher.decrypt(account.credentials_ciphertext)
+
+
+class AppConfigurationRepository:
+    """Persist encrypted application settings entered by the operator."""
+
+    CONFIGURATION_ID = 1
+
+    def __init__(self, session: Session, cipher: CredentialCipher) -> None:
+        self.session = session
+        self.cipher = cipher
+
+    def load(self) -> dict[str, Any]:
+        configuration = self.session.get(AppConfiguration, self.CONFIGURATION_ID)
+        if configuration is None:
+            return {}
+        return self.cipher.decrypt(configuration.settings_ciphertext)
+
+    def save(self, values: Mapping[str, Any]) -> AppConfiguration:
+        configuration = self.session.get(AppConfiguration, self.CONFIGURATION_ID)
+        if configuration is None:
+            configuration = AppConfiguration(id=self.CONFIGURATION_ID, settings_ciphertext="")
+        configuration.settings_ciphertext = self.cipher.encrypt(values)
+        configuration.credential_key_id = "primary"
+        self.session.add(configuration)
+        self.session.flush()
+        return configuration
 
 
 class SyncPairRepository:

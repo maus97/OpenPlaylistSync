@@ -2,6 +2,7 @@
 
 from collections.abc import Callable
 
+from apscheduler.jobstores.base import JobLookupError
 from apscheduler.schedulers.background import BackgroundScheduler
 
 from ops.config import Settings
@@ -18,6 +19,24 @@ class SchedulerService:
     def start(self) -> None:
         if self.scheduler.running or not self.settings.scheduler_enabled:
             return
+        self._schedule_job()
+        self.scheduler.start()
+
+    def reconfigure(self, settings: Settings) -> None:
+        """Apply GUI scheduler changes without requiring a shell restart."""
+
+        self.settings = settings
+        if self.scheduler.running:
+            try:
+                self.scheduler.remove_job("synchronization-tick")
+            except JobLookupError:
+                pass
+            if self.settings.scheduler_enabled:
+                self._schedule_job()
+        elif self.settings.scheduler_enabled:
+            self.start()
+
+    def _schedule_job(self) -> None:
         if self.sync_job is not None:
             self.scheduler.add_job(
                 self.sync_job,
@@ -29,7 +48,6 @@ class SchedulerService:
                 coalesce=True,
                 misfire_grace_time=300,
             )
-        self.scheduler.start()
 
     def shutdown(self) -> None:
         if self.scheduler.running:

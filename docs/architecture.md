@@ -7,9 +7,9 @@ directions between supported music providers. The first providers are Spotify
 and YouTube Music. The design prioritizes local control, recoverability, and
 safe behavior when the two providers disagree.
 
-This document describes the implementation boundary created by the initial
-scaffold. It does not claim that provider authentication or synchronization is
-implemented.
+This document describes the implementation boundary for the runnable
+operator-assisted milestone. Provider authentication is initiated from the
+local UI, while synchronization remains reviewable and safety-gated.
 
 ## Goals and non-goals
 
@@ -26,8 +26,6 @@ implemented.
 
 ### Remaining non-goals for this milestone
 
-- Implementing Spotify OAuth.
-- Implementing YouTube Music authentication.
 - Running unattended synchronization without operator approval.
 - Guaranteeing provider API behavior before live-account verification.
 - Adding telemetry, hosted services, or a cloud control plane.
@@ -54,6 +52,16 @@ flowchart TD
 
 HTTP routes, request/response schemas, and dependency wiring. The API layer
 must not contain provider-specific reconciliation rules.
+
+The `/settings` route is the operator configuration boundary. It never renders
+saved client secrets and persists submitted values through the encrypted
+configuration repository.
+
+### `src/ops/configuration.py`
+
+This service overlays encrypted GUI settings on deployment defaults. Provider
+OAuth values and scheduler preferences take effect on the next request; the
+scheduler is reconfigured immediately after a settings save.
 
 ### `src/ops/providers/`
 
@@ -84,12 +92,18 @@ Those boundaries are backed by SQLite. Alembic is the only schema-change
 mechanism. The database path is configuration-driven so the same code works
 with a local file or a Docker volume.
 
+`app_configuration` stores the operator-entered provider client settings and
+scheduler preferences as Fernet ciphertext. Deployment defaults can still come
+from environment variables, but values saved through `/settings` take
+precedence without requiring a shell or container rebuild.
+
 ### Templates and static assets
 
 The UI will be server-rendered with Jinja2. HTMX should be used for focused
 partial updates rather than introducing a separate frontend build system.
 The current UI provides provider connection entry points, pair configuration,
-run history, and a synchronization-plan review screen. Applying a plan first
+encrypted settings management, run history, and a synchronization-plan review
+screen. Applying a plan first
 re-fetches both provider playlists and rejects stale fingerprints.
 It also includes a local synthetic provider pair so the complete baseline,
 preview, approval, and application flow can be tested without network access.
@@ -140,6 +154,7 @@ visible and must not become the next baseline.
 
 The initial migration establishes these conceptual records:
 
+- `app_configuration`: encrypted operator settings and scheduler preferences;
 - `provider_accounts`: provider identity plus encrypted credential ciphertext;
 - `sync_pairs`: the two provider accounts and playlist IDs being synchronized;
 - `sync_baselines`: the last successful normalized snapshot for a pair and
@@ -153,14 +168,16 @@ to reconstruct the previous successful baseline.
 
 ## Security and privacy
 
-- Configuration is read from environment variables or a local `.env` file that
-  is ignored by Git.
+- Deployment configuration is read from environment variables or an optional
+  local `.env` file that is ignored by Git. Operator settings are entered from
+  the GUI and stored encrypted in SQLite.
 - No credential values are present in source, tests, logs, URLs, or exception
   messages.
 - The credential service encrypts provider tokens before SQLAlchemy persistence
   and decrypts only inside the provider adapter boundary.
-- The encryption key must come from operator-managed configuration, not the
-  database. Key rotation and recovery behavior require an explicit decision.
+- If deployment does not provide secrets, OPS generates a session secret and a
+  Fernet key in the persistent data directory on first start. The key is kept
+  outside the database so database ciphertext cannot decrypt itself.
 - The service has no telemetry endpoint, analytics dependency, or outbound
   call except provider operations initiated by the operator.
 - Destructive operations need a dry-run plan, explicit confirmation, and a
@@ -190,8 +207,8 @@ volume. No TrueNAS-specific code is required or imported.
    implemented for the current milestone; define key rotation, recovery, and
    behavior when the key is unavailable.
 2. **OAuth callback and session model:** decide how a self-hosted instance
-   safely handles callback URLs, browser sessions, and token refresh without
-   exposing secrets in logs.
+   safely handles callback URLs, browser sessions, token refresh, and optional
+   remote access without exposing secrets in logs.
 3. **Track identity and matching policy:** define exact-match fields, fuzzy
    matching thresholds, manual resolution, and behavior for unavailable tracks.
 4. **Conflict policy:** decide whether conflicts pause a run, create a review

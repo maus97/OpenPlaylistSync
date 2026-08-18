@@ -7,6 +7,7 @@ services:
     environment:
       OPS_ENVIRONMENT: production
       OPS_DATABASE_URL: sqlite:////data/ops.db
+      OPS_DATA_DIR: /data
       OPS_LOG_LEVEL: INFO
       OPS_SESSION_SECRET: ${OPS_SESSION_SECRET:-}
       OPS_SESSION_COOKIE_SECURE: ${OPS_SESSION_COOKIE_SECURE:-false}

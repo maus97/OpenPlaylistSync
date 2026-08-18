@@ -4,10 +4,10 @@ Open Playlist Sync is an open-source, privacy-first, self-hosted service for
 bidirectional playlist synchronization. The initial provider targets are
 Spotify and YouTube Music.
 
-This repository contains the implementation architecture and the first runnable
-application milestone. Provider writes and full synchronization execution remain
-intentionally guarded while the reconciliation and credential boundaries are
-validated.
+This repository contains the implementation architecture and a runnable
+operator-assisted application milestone. Provider credentials and sync settings
+can be entered from the local web UI; writes remain guarded by plan review and
+explicit safety checks.
 
 ## Design commitments
 
@@ -61,9 +61,10 @@ Copy `.env.example` to `.env` for local configuration. The default database is
 uv run alembic upgrade head
 ```
 
-The migration establishes only the persistence boundary and encrypted-secret
-storage shape. It does not authenticate with Spotify or YouTube Music and does
-not synchronize playlists.
+The migration establishes the persistence boundary, encrypted credential
+storage, and encrypted GUI configuration storage. Provider authentication is
+started from `/settings` and `/pairs`; synchronization still requires the
+operator's review and approval flow.
 
 ## Docker
 
@@ -103,5 +104,11 @@ Remaining for production hardening:
 ## Production setup
 
 For immediate testing, open `/` and choose **Try local demo**. For real
-providers, configure OAuth applications and credentials in a local secret
-manager or ignored `.env` file; never commit them to Git.
+providers, open `/settings` and enter the OAuth client values through the GUI.
+OPS automatically creates local session and encryption keys in the persistent
+data directory when deployment values are not supplied. The optional `.env`
+file is intended for deployment overrides, not normal operator setup.
+
+After saving settings, open `/pairs`, connect Spotify and YouTube Music, choose
+playlists, and establish the first non-destructive baseline. Review each later
+plan before applying it.

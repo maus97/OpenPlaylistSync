@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
 from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings, get_settings
+from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
 from ops.models import ProviderAccount, SyncBaseline, SyncPair, SyncRun
 from ops.providers.demo import mutate_demo_state, reset_demo_state
@@ -34,8 +35,8 @@ templates = Jinja2Templates(
 )
 
 
-def settings() -> Settings:
-    return get_settings()
+def settings(session: Annotated[Session, Depends(get_db)]) -> Settings:
+    return load_app_settings(session)
 
 
 def provider_for_account(session: Session, app_settings: Settings, account: ProviderAccount) -> Any:
@@ -63,6 +64,81 @@ def index(request: Request, app_settings: Annotated[Settings, Depends(settings)]
         name="index.html",
         context={"app_name": app_settings.app_name, "environment": app_settings.environment},
     )
+
+
+@router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
+def settings_page(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    app_settings: Annotated[Settings, Depends(settings)],
+    saved: str | None = None,
+) -> HTMLResponse:
+    """Render the operator configuration screen without revealing secrets."""
+
+    return templates.TemplateResponse(
+        request=request,
+        name="settings.html",
+        context={
+            "saved": saved == "1",
+            "spotify_client_id": app_settings.spotify_client_id or "",
+            "spotify_redirect_uri": app_settings.spotify_redirect_uri,
+            "spotify_secret_saved": bool(app_settings.spotify_client_secret),
+            "ytmusic_client_id": app_settings.ytmusic_client_id or "",
+            "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
+            "scheduler_enabled": app_settings.scheduler_enabled,
+            "sync_interval_minutes": app_settings.sync_interval_minutes,
+        },
+    )
+
+
+@router.post("/settings", response_class=RedirectResponse, include_in_schema=False)
+def save_settings_route(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    spotify_client_id: Annotated[str, Form()] = "",
+    spotify_client_secret: Annotated[str, Form()] = "",
+    spotify_redirect_uri: Annotated[str, Form()] = "",
+    clear_spotify_secret: Annotated[str | None, Form()] = None,
+    ytmusic_client_id: Annotated[str, Form()] = "",
+    ytmusic_client_secret: Annotated[str, Form()] = "",
+    clear_ytmusic_secret: Annotated[str | None, Form()] = None,
+    scheduler_enabled: Annotated[str | None, Form()] = None,
+    sync_interval_minutes: Annotated[int, Form()] = 60,
+) -> RedirectResponse:
+    """Encrypt and save provider and scheduler settings submitted by the UI."""
+
+    base_settings = get_settings()
+    saved = load_saved_settings(session, base_settings)
+
+    def existing_secret(key: str) -> str:
+        if key in saved:
+            return str(saved[key] or "")
+        return str(getattr(base_settings, key) or "")
+
+    values = {
+        "spotify_client_id": spotify_client_id.strip(),
+        "spotify_client_secret": (
+            ""
+            if clear_spotify_secret is not None
+            else spotify_client_secret.strip() or existing_secret("spotify_client_secret")
+        ),
+        "spotify_redirect_uri": spotify_redirect_uri.strip() or base_settings.spotify_redirect_uri,
+        "ytmusic_client_id": ytmusic_client_id.strip(),
+        "ytmusic_client_secret": (
+            ""
+            if clear_ytmusic_secret is not None
+            else ytmusic_client_secret.strip() or existing_secret("ytmusic_client_secret")
+        ),
+        "scheduler_enabled": scheduler_enabled is not None,
+        "sync_interval_minutes": max(1, min(sync_interval_minutes, 1440)),
+    }
+    save_app_settings(session, values, base_settings)
+    session.commit()
+
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is not None:
+        scheduler.reconfigure(load_app_settings(session, base_settings))
+    return RedirectResponse("/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/healthz", tags=["system"])
@@ -264,7 +340,7 @@ def pairs(
     session: Annotated[Session, Depends(get_db)],
     connected: str | None = None,
 ) -> HTMLResponse:
-    app_settings = get_settings()
+    app_settings = load_app_settings(session)
     accounts = list(session.scalars(select(ProviderAccount).order_by(ProviderAccount.id)))
     connection_status = {
         "spotify": all(

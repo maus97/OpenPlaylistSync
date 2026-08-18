@@ -1,0 +1,67 @@
+{% extends "base.html" %}
+
+{% block title %}Settings{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero">
+  <div>
+    <p class="eyebrow">LOCAL CONTROL CENTRE</p>
+    <h1>Configure OPS your way.</h1>
+    <p class="lede">Provider credentials and sync preferences are saved from this screen and encrypted before they reach SQLite.</p>
+  </div>
+  <div class="hero-orb orb-green" aria-hidden="true"></div>
+</section>
+
+{% if saved %}<div class="success-alert page-alert">Settings saved securely. Provider connection buttons are ready when both client credentials are present.</div>{% endif %}
+
+<form method="post" action="/settings">
+  <section class="grid two-up">
+    <article class="card">
+      <div class="card-heading"><span class="icon-bubble green">●</span><div><h2>Spotify</h2><p>OAuth client used for playlist read and write access.</p></div></div>
+      <label>Client ID
+        <input name="spotify_client_id" value="{{ spotify_client_id }}" autocomplete="off" placeholder="Paste Spotify client ID">
+      </label>
+      <label>Client secret{% if spotify_secret_saved %} <span class="field-note">saved</span>{% endif %}
+        <input type="password" name="spotify_client_secret" autocomplete="new-password" placeholder="Leave blank to keep the saved secret">
+      </label>
+      <label>Redirect URI
+        <input name="spotify_redirect_uri" value="{{ spotify_redirect_uri }}" autocomplete="url">
+      </label>
+      <label class="checkbox-label"><input type="checkbox" name="clear_spotify_secret" value="1"> Clear saved Spotify secret</label>
+      <p class="field-help">Register the redirect URI exactly as shown in your Spotify app.</p>
+    </article>
+
+    <article class="card">
+      <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2>YouTube Music</h2><p>OAuth client used for library read and write access.</p></div></div>
+      <label>Google OAuth client ID
+        <input name="ytmusic_client_id" value="{{ ytmusic_client_id }}" autocomplete="off" placeholder="Paste Google OAuth client ID">
+      </label>
+      <label>Google OAuth client secret{% if ytmusic_secret_saved %} <span class="field-note">saved</span>{% endif %}
+        <input type="password" name="ytmusic_client_secret" autocomplete="new-password" placeholder="Leave blank to keep the saved secret">
+      </label>
+      <label class="checkbox-label"><input type="checkbox" name="clear_ytmusic_secret" value="1"> Clear saved YouTube Music secret</label>
+      <p class="field-help">Create the OAuth client and enable YouTube Data API access before connecting.</p>
+    </article>
+  </section>
+
+  <section class="grid two-up">
+    <article class="card">
+      <div class="card-heading"><span class="icon-bubble green">↻</span><div><h2>Sync schedule</h2><p>OPS only creates safe previews automatically.</p></div></div>
+      <label class="checkbox-label"><input type="checkbox" name="scheduler_enabled" value="1"{% if scheduler_enabled %} checked{% endif %}> Enable scheduled preview checks</label>
+      <label>Check interval, in minutes
+        <input type="number" name="sync_interval_minutes" min="1" max="1440" value="{{ sync_interval_minutes }}">
+      </label>
+      <p class="field-help">Scheduled checks never approve destructive changes automatically.</p>
+    </article>
+
+    <article class="card accent-card">
+      <div class="card-heading"><span class="icon-bubble red">▣</span><div><h2>Local security</h2><p>Managed automatically for this installation.</p></div></div>
+      <p class="muted-copy">OPS creates its local session and encryption keys on first start and keeps them in the persistent data volume. Provider client credentials and OAuth tokens are encrypted before database storage.</p>
+      <p class="muted-copy">Keep this service private or behind your own trusted network access. OPS has no telemetry or hosted account.</p>
+    </article>
+  </section>
+
+  <div class="hero-actions"><button class="button primary" type="submit">Save settings</button><a class="button ghost" href="/pairs">Back to pairs</a></div>
+</form>
+{% endblock %}
+
