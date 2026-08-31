@@ -31,6 +31,9 @@ and decisions that remain open. The
 ordered roadmap, release gates, and definition of done for taking the current
 milestone to dependable real-world synchronization.
 
+For browser setup instructions, open **Setup** in OPS. For server, Docker, and
+TrueNAS deployment instructions, read the [deployment guide](docs/deployment.md).
+
 ## Local development
 
 The target runtime is Python 3.12. The commands below use `uv` to create and
@@ -80,6 +83,10 @@ docker compose up --build
 The Compose file stores SQLite data in the named `ops-data` volume and exposes
 port `8000`. The container runs as a non-root user.
 
+For a normal server, change the public hostname and redirect address in the
+provider dashboards before connecting accounts. See the deployment guide for
+the reverse-proxy, HTTPS, backup, update, and TrueNAS steps.
+
 ## Repository status
 
 Implemented:
@@ -96,11 +103,11 @@ Implemented:
 - First-sync choices for merge, source-led, target-led, or accept-as-is setup;
   all initial convergence actions are additions only.
 - Occurrence-aware snapshots, provider paging, confidence-gated destination
-  searches, Spotify access-token refresh, and exact YouTube Music removals.
+  searches, access-token refresh, and exact YouTube Music playlist-item removals.
 - Durable plan/action journal, CSRF-protected browser forms, and pair
   pause/delete/disconnect controls.
-- Offline demo workspace for testing baseline creation, simulated additions and
-  removals, conflict review, and safe application without provider credentials.
+- A simple browser UI for provider setup, account connections, playlist creation,
+  pairing, plan review, and run history.
 - Python packaging, pytest, Ruff, Docker, Compose, environment template, and
   GitHub Actions CI.
 
@@ -114,8 +121,8 @@ Before using valuable real playlists:
 
 ## Production setup
 
-For immediate testing, open `/` and choose **Try local demo**. For real
-providers, open `/settings` and enter the OAuth client values through the GUI.
+For real providers, open `/setup`, then enter the OAuth client values through
+the GUI at `/settings`.
 OPS automatically creates local session and encryption keys in the persistent
 data directory when deployment values are not supplied. The optional `.env`
 file is intended for deployment overrides, not normal operator setup.
@@ -127,7 +134,7 @@ Review each later plan before applying it.
 
 ### Provider access setup
 
-The same instructions are available in the **Settings** page. No provider
+The same instructions are available on the **Setup** page. No provider
 passwords are entered into OPS; the provider authorization pages handle account
 approval.
 
@@ -141,8 +148,9 @@ approval.
 4. Save the settings, open Pairs, choose **Connect Spotify**, and approve the
    requested access.
 
-OPS requests `playlist-read-private`, `playlist-read-collaborative`,
-`playlist-modify-private`, and `playlist-modify-public` so it can read and
+OPS requests `user-read-private`, `playlist-read-private`,
+`playlist-read-collaborative`, `playlist-modify-private`, and
+`playlist-modify-public` so it can search the Spotify catalogue and read or
 write private, public, and collaborative playlists. Spotify requires the
 loopback URI to match exactly and uses `127.0.0.1`, not `localhost`; see the
 [redirect URI rules](https://developer.spotify.com/documentation/web-api/concepts/redirect_uri)
@@ -160,7 +168,10 @@ and [playlist scopes](https://developer.spotify.com/documentation/web-api/concep
    verification URL and one-time code. Complete the approval, return to OPS,
    and choose **I completed authorization**.
 
-This follows the [ytmusicapi OAuth setup](https://ytmusicapi.readthedocs.io/en/latest/setup/oauth.html)
-and uses its `https://www.googleapis.com/auth/youtube` read/write scope. Google
-Cloud's [authorization credential guide](https://developers.google.com/youtube/registering_an_application)
+OPS uses the Google device-code approval flow with the
+`https://www.googleapis.com/auth/youtube` read/write scope. Playlist discovery,
+matching, creation, additions, and removals use the official
+[YouTube Data API v3](https://developers.google.com/youtube/v3), rather than
+private YouTube Music endpoints. Google Cloud's
+[authorization credential guide](https://developers.google.com/youtube/registering_an_application)
 explains the OAuth credential types.

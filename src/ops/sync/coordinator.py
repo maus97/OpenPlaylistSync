@@ -2,14 +2,18 @@
 
 import json
 from collections.abc import Callable
-from datetime import UTC, datetime
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
+from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings
-from ops.models import ProviderAccount, SyncBaseline, SyncPair
+from ops.models import ProviderAccount, ProviderTrackMapping, SyncBaseline, SyncPair
+from ops.providers.types import ProviderTrack
 from ops.security.crypto import CredentialCipher
 from ops.storage.repositories import (
     ProviderAccountRepository,
@@ -88,20 +92,50 @@ class SyncCoordinator:
         self.session.commit()
         return merged
 
+    def _refresh_youtube_music_credentials(
+        self, account: ProviderAccount, credentials: dict[str, Any]
+    ) -> dict[str, Any]:
+        """Refresh a Google OAuth access token before official API calls."""
+
+        expires_at = credentials.get("expires_at")
+        try:
+            expired = not expires_at or datetime.fromisoformat(str(expires_at)).astimezone(
+                UTC
+            ) <= datetime.now(UTC)
+        except ValueError:
+            expired = True
+        if not expired:
+            return credentials
+        refresh_token = credentials.get("refresh_token")
+        if not refresh_token:
+            raise ValueError("YouTube Music authorization expired; reconnect the account")
+        if not self.settings.ytmusic_client_id or not self.settings.ytmusic_client_secret:
+            raise ValueError("YouTube Music OAuth settings are incomplete")
+        refreshed = YouTubeMusicAuthService(
+            self.settings.ytmusic_client_id, self.settings.ytmusic_client_secret
+        ).refresh_token(str(refresh_token))
+        merged = {
+            **credentials,
+            **refreshed,
+            "refresh_token": refreshed.get("refresh_token", refresh_token),
+            "expires_at": (
+                datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
+            ).isoformat(),
+        }
+        if self.cipher is None:
+            raise ValueError("credential encryption is not configured")
+        ProviderAccountRepository(self.session, self.cipher).save_credentials(account, merged)
+        self.session.commit()
+        return merged
+
     def _credentials(self, account: ProviderAccount) -> dict[str, Any]:
-        if account.provider_name.startswith("demo_"):
-            return {}
         if self.cipher is None:
             raise ValueError("credential encryption is not configured")
         credentials = ProviderAccountRepository(self.session, self.cipher).load_credentials(account)
         if account.provider_name == "spotify":
             credentials = self._refresh_spotify_credentials(account, credentials)
         if account.provider_name == "youtube_music":
-            credentials = {
-                **credentials,
-                "_oauth_client_id": self.settings.ytmusic_client_id,
-                "_oauth_client_secret": self.settings.ytmusic_client_secret,
-            }
+            credentials = self._refresh_youtube_music_credentials(account, credentials)
         return credentials
 
     def _providers(
@@ -125,14 +159,66 @@ class SyncCoordinator:
     def _current_state(
         self, pair: SyncPair
     ) -> tuple[PlaylistState, PlaylistState, SyncProvider, SyncProvider]:
-        source_provider, target_provider, _, _ = self._providers(pair)
-        source = PlaylistState.from_provider_playlist(
-            source_provider.get_playlist(pair.source_playlist_id)
+        source_provider, target_provider, source_account, target_account = self._providers(pair)
+        source = self._apply_track_mappings(
+            source_account.id,
+            PlaylistState.from_provider_playlist(
+                source_provider.get_playlist(pair.source_playlist_id)
+            ),
         )
-        target = PlaylistState.from_provider_playlist(
-            target_provider.get_playlist(pair.target_playlist_id)
+        target = self._apply_track_mappings(
+            target_account.id,
+            PlaylistState.from_provider_playlist(
+                target_provider.get_playlist(pair.target_playlist_id)
+            ),
         )
         return source, target, source_provider, target_provider
+
+    def _apply_track_mappings(self, account_id: int, state: PlaylistState) -> PlaylistState:
+        """Use previously verified cross-provider matches when reading snapshots."""
+
+        track_ids = {track.source_provider_track_id for track in state.tracks}
+        if not track_ids:
+            return state
+        mappings = {
+            mapping.provider_track_id: mapping.canonical_key
+            for mapping in self.session.scalars(
+                select(ProviderTrackMapping).where(
+                    ProviderTrackMapping.account_id == account_id,
+                    ProviderTrackMapping.provider_track_id.in_(track_ids),
+                )
+            )
+        }
+        if not mappings:
+            return state
+        return replace(
+            state,
+            tracks=tuple(
+                replace(track, key=mappings.get(track.source_provider_track_id, track.key))
+                for track in state.tracks
+            ),
+        )
+
+    def _save_track_mapping(
+        self, account_id: int, track: ProviderTrack, canonical_key: str
+    ) -> None:
+        """Remember the exact destination ID returned by a successful add."""
+
+        mapping = self.session.scalar(
+            select(ProviderTrackMapping).where(
+                ProviderTrackMapping.account_id == account_id,
+                ProviderTrackMapping.provider_track_id == track.provider_track_id,
+            )
+        )
+        if mapping is None:
+            mapping = ProviderTrackMapping(
+                account_id=account_id,
+                provider_track_id=track.provider_track_id,
+                canonical_key=canonical_key,
+            )
+        else:
+            mapping.canonical_key = canonical_key
+        self.session.add(mapping)
 
     def _save_baseline(
         self, pair: SyncPair, source: PlaylistState, target: PlaylistState
@@ -226,13 +312,15 @@ class SyncCoordinator:
                 target_playlist_id=pair.target_playlist_id,
                 approval=approval,
                 on_action_completed=lambda index: action_repo.complete(journal[index]),
+                on_track_resolved=lambda action, track: self._save_track_mapping(
+                    pair.source_account_id
+                    if action.side.value == "source"
+                    else pair.target_account_id,
+                    track,
+                    action.track.key,
+                ),
             )
-            resulting_source = PlaylistState.from_provider_playlist(
-                source_provider.get_playlist(pair.source_playlist_id)
-            )
-            resulting_target = PlaylistState.from_provider_playlist(
-                target_provider.get_playlist(pair.target_playlist_id)
-            )
+            resulting_source, resulting_target, _, _ = self._current_state(pair)
             self._save_baseline(pair, resulting_source, resulting_target)
             run_repo.finish(run, "applied", json.dumps({"actions": len(plan.actions)}))
             self.session.commit()

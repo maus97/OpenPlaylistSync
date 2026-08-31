@@ -32,6 +32,10 @@ class SpotifyProvider:
             raise ProviderUnavailable("Spotify could not be reached") from exc
         if response.status_code == 401:
             raise AuthorizationRequired("Spotify authorization expired; reconnect the account")
+        if response.status_code == 403:
+            raise AuthorizationRequired(
+                "Spotify access is incomplete; reconnect Spotify and approve the requested access"
+            )
         if response.status_code == 429:
             retry_after = response.headers.get("Retry-After")
             raise RateLimited(int(retry_after) if retry_after and retry_after.isdigit() else None)
@@ -42,7 +46,10 @@ class SpotifyProvider:
 
     @staticmethod
     def _track(item: dict[str, Any], position: int | None = None) -> ProviderTrack | None:
-        track = item.get("track", item)
+        # Spotify's current playlist-items response calls the nested object
+        # ``item``. Older/deprecated responses used ``track``; accepting both
+        # keeps the adapter tolerant of cached or mocked provider payloads.
+        track = item.get("item") or item.get("track") or item
         if not track or not track.get("id") or track.get("type", "track") != "track":
             return None
         return ProviderTrack(
@@ -82,15 +89,22 @@ class SpotifyProvider:
         payload = self._request(
             "GET",
             f"/playlists/{raw_id}",
+            params={"fields": "id,name,description", "market": "from_token"},
+        ).json()
+        # Spotify removed the old ``/tracks`` playlist endpoint in favor of
+        # ``/items``. The nested track object is now named ``item``.
+        tracks_payload = self._request(
+            "GET",
+            f"/playlists/{raw_id}/items",
             params={
                 "fields": (
-                    "id,name,description,tracks(items(track(id,name,artists(name),album(name),duration_ms,"
-                    "external_ids(isrc),type)),next)"
+                    "items(item(id,name,artists(name),album(name),duration_ms,"
+                    "external_ids,is_local,type)),next"
                 ),
                 "market": "from_token",
+                "limit": "50",
             },
         ).json()
-        tracks_payload = payload.get("tracks", {})
         tracks: list[ProviderTrack] = []
         for position, item in enumerate(self._pages(tracks_payload)):
             track = self._track(item, position)
@@ -118,10 +132,9 @@ class SpotifyProvider:
         return choose_best_candidate(track, candidates)
 
     def create_playlist(self, name: str, description: str | None = None) -> ProviderPlaylist:
-        profile = self._request("GET", "/me").json()
         payload = self._request(
             "POST",
-            f"/users/{profile['id']}/playlists",
+            "/me/playlists",
             headers={"Content-Type": "application/json"},
             json={"name": name, "description": description or "", "public": False},
         ).json()
@@ -139,7 +152,7 @@ class SpotifyProvider:
             if uris:
                 self._request(
                     "POST",
-                    f"/playlists/{raw_id}/tracks",
+                    f"/playlists/{raw_id}/items",
                     headers={"Content-Type": "application/json"},
                     json={"uris": uris},
                 )
@@ -149,16 +162,16 @@ class SpotifyProvider:
         for offset in range(0, len(tracks), 100):
             removal_items = []
             for track in tracks[offset : offset + 100]:
-                item: dict[str, Any] = {
-                    "uri": f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"
-                }
-                if track.position is not None:
-                    item["positions"] = [track.position]
-                removal_items.append(item)
+                # The current ``/items`` endpoint accepts item URIs. The
+                # removed ``/tracks`` endpoint accepted positions, but
+                # sending that legacy shape to ``/items`` is not supported.
+                removal_items.append(
+                    {"uri": f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"}
+                )
             if removal_items:
                 self._request(
                     "DELETE",
-                    f"/playlists/{raw_id}/tracks",
+                    f"/playlists/{raw_id}/items",
                     headers={"Content-Type": "application/json"},
-                    json={"tracks": removal_items},
+                    json={"items": removal_items},
                 )

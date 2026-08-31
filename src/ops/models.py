@@ -68,6 +68,21 @@ class SyncPair(Base):
     )
 
 
+class ProviderTrackMapping(Base):
+    """A verified provider track ID mapped to OPS's canonical sync key."""
+
+    __tablename__ = "provider_track_mappings"
+    __table_args__ = (UniqueConstraint("account_id", "provider_track_id"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), nullable=False)
+    provider_track_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    canonical_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
 class SyncBaseline(Base):
     """The last successful normalized snapshot for a synchronization pair."""
 

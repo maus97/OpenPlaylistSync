@@ -3,9 +3,9 @@
 {% block title %}Runs{% endblock %}
 
 {% block content %}
-<section class="hero compact-hero"><div><p class="eyebrow">AUDIT TRAIL</p><h1>Every run, accounted for.</h1><p class="lede">Plans and baselines stay visible so you can understand what OPS did — and what it deliberately did not do.</p></div><div class="hero-orb orb-green" aria-hidden="true"></div></section>
+<section class="hero compact-hero"><div><p class="eyebrow">ACTIVITY</p><h1>Sync history.</h1><p class="lede">Each preview, baseline, and applied change is recorded here.</p></div><div class="hero-orb orb-green" aria-hidden="true"></div></section>
 <section class="card">
-  <div class="section-heading"><div><p class="eyebrow">RECENT ACTIVITY</p><h2>Synchronization runs</h2></div><a class="button ghost" href="/pairs">Review pairs</a></div>
-  {% if runs %}<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Started</th><th>Completed</th></tr></thead><tbody>{% for run in runs %}<tr><td>#{{ run.id }}</td><td><span class="status-dot active"></span>{{ run.status }}</td><td>{{ run.started_at }}</td><td>{{ run.completed_at or "-" }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><span class="empty-icon">✦</span><h3>No runs yet</h3><p>Load the local demo, establish a baseline, and preview your first change.</p></div>{% endif %}
+  <div class="section-heading"><div><p class="eyebrow">RECENT</p><h2>Sync runs</h2></div><a class="button ghost" href="/pairs">Open playlists</a></div>
+  {% if runs %}<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Started</th><th>Finished</th></tr></thead><tbody>{% for run in runs %}<tr><td>#{{ run.id }}</td><td><span class="status-dot {{ 'inactive' if run.status in ['failed', 'conflict'] else 'active' }}"></span>{{ run.status|replace('_', ' ')|title }}</td><td>{{ run.started_at }}</td><td>{{ run.completed_at or "–" }}</td></tr>{% endfor %}</tbody></table></div>{% else %}<div class="empty-state"><span class="empty-icon">✦</span><h3>No activity yet</h3><p>Create a pair, then review its first sync.</p></div>{% endif %}
 </section>
 {% endblock %}

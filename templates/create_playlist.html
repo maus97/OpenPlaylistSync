@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+
+{% block title %}Create playlist{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero">
+  <div>
+    <p class="eyebrow">NEW PLAYLIST</p>
+    <h1>Create a {{ account.provider_name|replace('_', ' ')|title }} playlist.</h1>
+    <p class="lede">This creates a new private playlist in your connected account. It does not copy any tracks yet.</p>
+  </div>
+  <div class="hero-orb {% if account.provider_name == 'spotify' %}orb-green{% else %}orb-pink{% endif %}" aria-hidden="true"></div>
+</section>
+
+<section class="card narrow-card">
+  <form method="post" action="/playlists">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="account_id" value="{{ account.id }}">
+    <input type="hidden" name="side" value="{{ side }}">
+    <input type="hidden" name="other_selection" value="{{ other_selection }}">
+    <input type="hidden" name="initial_sync_policy" value="{{ initial_sync_policy }}">
+    <label>Playlist name
+      <input name="name" required maxlength="100" autofocus placeholder="My synced playlist">
+    </label>
+    <label>Description (optional)
+      <input name="description" maxlength="300" placeholder="Created with Open Playlist Sync">
+    </label>
+    <div class="hero-actions"><button class="button primary" type="submit">Create playlist</button><a class="button ghost" href="/pairs">Cancel</a></div>
+  </form>
+</section>
+{% endblock %}

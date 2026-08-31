@@ -5,28 +5,29 @@
 {% block content %}
 <section class="hero">
   <div class="hero-copy">
-    <p class="eyebrow">PRIVATE PLAYLIST INTELLIGENCE</p>
-    <h1>Your music.<br><span class="brand-green">Your rules.</span></h1>
-    <p class="lede">A calm, local-first command centre for keeping Spotify and YouTube Music playlists in step — with every change visible before it happens.</p>
+    <p class="eyebrow">OPEN PLAYLIST SYNC</p>
+    <h1>Keep playlists<br><span class="brand-green">together.</span></h1>
+    <p class="lede">Sync Spotify and YouTube Music playlists from one private, self-hosted app. Review every change before it is made.</p>
     <div class="hero-actions">
-      <a class="button primary" href="/pairs">Open workspace</a>
-      <form method="post" action="/demo/seed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Try local demo</button></form>
+      <a class="button primary" href="/setup">Set up OPS</a>
+      <a class="button ghost" href="/pairs">Open playlists</a>
     </div>
   </div>
   <div class="hero-orb orb-green" aria-hidden="true"></div>
 </section>
 
 <section class="grid two-up">
-  <article class="card accent-card"><div class="card-heading"><span class="icon-bubble green">↔</span><div><h2>Bidirectional by design</h2><p>See both sides. Resolve only what you approve.</p></div></div><a class="text-link" href="/pairs">Configure a pair →</a></article>
-  <article class="card"><div class="card-heading"><span class="icon-bubble red">⌁</span><div><h2>Local and private</h2><p>No telemetry. Secrets stay encrypted at rest.</p></div></div><a class="text-link" href="/runs">Inspect run history →</a></article>
+  <article class="card accent-card"><div class="card-heading"><span class="icon-bubble green">↔</span><div><h2>Two-way sync</h2><p>Changes made on either side can be reviewed and applied.</p></div></div><a class="text-link" href="/pairs">Choose playlists →</a></article>
+  <article class="card"><div class="card-heading"><span class="icon-bubble red">⌁</span><div><h2>Your data stays here</h2><p>No telemetry. Credentials are encrypted in local storage.</p></div></div><a class="text-link" href="/runs">View activity →</a></article>
 </section>
 
 <section class="card">
-  <div class="section-heading"><div><p class="eyebrow">START HERE</p><h2>Three safe moves</h2></div><span class="pill">{{ environment }}</span></div>
+  <div class="section-heading"><div><p class="eyebrow">GET STARTED</p><h2>Four simple steps</h2></div><span class="pill">{{ environment }}</span></div>
   <div class="grid two-up">
-    <div><strong>01 · Load the demo</strong><p class="muted-copy">Create two synthetic provider accounts and a shared playlist without network access.</p></div>
-    <div><strong>02 · Establish baseline</strong><p class="muted-copy">Record the current state without modifying either playlist.</p></div>
-    <div><strong>03 · Review changes</strong><p class="muted-copy">Simulate an addition or removal, inspect the plan, and explicitly approve it.</p></div>
+    <div><strong>1. Set up provider apps</strong><p class="muted-copy">Follow the browser-only instructions for Spotify and Google Cloud.</p></div>
+    <div><strong>2. Connect your accounts</strong><p class="muted-copy">Save the app details, then approve access with each provider.</p></div>
+    <div><strong>3. Choose or create playlists</strong><p class="muted-copy">Pair one Spotify playlist with one YouTube Music playlist.</p></div>
+    <div><strong>4. Review changes</strong><p class="muted-copy">The first sync never removes tracks. Later deletions need your confirmation.</p></div>
   </div>
 </section>
 {% endblock %}

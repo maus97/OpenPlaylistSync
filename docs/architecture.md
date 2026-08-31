@@ -81,11 +81,17 @@ rejects conflicts and stale fingerprints, and requires an explicit phrase for
 destructive actions.
 
 Snapshots preserve playlist occurrences rather than collapsing duplicate songs.
-Spotify positions and YouTube Music `setVideoId` values remain attached to an
+Spotify positions and YouTube Music playlist-item IDs remain attached to an
 occurrence so a reviewed removal can target one exact provider item. Initial
 synchronization has an explicit persisted policy: merge, source-led,
 target-led, or accept-as-is. The first three modes add only; no initial policy
 can infer a deletion.
+
+When OPS successfully adds a resolved track to the other provider, it stores
+that destination provider ID with the source's canonical sync key in
+`provider_track_mappings`. Later snapshots apply that verified mapping before
+three-way reconciliation. This keeps an item linked even when Spotify and
+YouTube Music display it with different titles.
 
 ### `src/ops/sync/`
 
@@ -116,8 +122,8 @@ The current UI provides provider connection entry points, pair configuration,
 encrypted settings management, run history, and a synchronization-plan review
 screen. Applying a plan first
 re-fetches both provider playlists and rejects stale fingerprints.
-It also includes a local synthetic provider pair so the complete baseline,
-preview, approval, and application flow can be tested without network access.
+It also provides a dedicated setup guide and a create-playlist step within the
+pairing flow, so normal configuration stays in the browser.
 
 ## Provider-neutral contract
 

@@ -4,6 +4,7 @@ import os
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
+from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
@@ -18,7 +19,6 @@ from ops.configuration import load_app_settings, load_saved_settings, save_app_s
 from ops.db import get_db
 from ops.models import ProviderAccount, SyncAction, SyncBaseline, SyncPair, SyncRun
 from ops.providers.base import ProviderError
-from ops.providers.demo import mutate_demo_state, reset_demo_state
 from ops.providers.factory import create_provider
 from ops.security.crypto import CredentialCipher, CredentialEncryptionError
 from ops.security.csrf import csrf_context, require_csrf
@@ -33,6 +33,8 @@ from ops.sync.executor import PlanExecutionError
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 
 router = APIRouter()
+SUPPORTED_PROVIDERS = frozenset({"spotify", "youtube_music"})
+NEW_PLAYLIST_PREFIX = "new:"
 templates = Jinja2Templates(
     directory=os.environ.get(
         "OPS_TEMPLATES_DIR", str(Path(__file__).resolve().parents[3] / "templates")
@@ -48,8 +50,8 @@ def settings(session: Annotated[Session, Depends(get_db)]) -> Settings:
 def provider_for_account(session: Session, app_settings: Settings, account: ProviderAccount) -> Any:
     """Build a provider for UI discovery without exposing credential payloads."""
 
-    if account.provider_name.startswith("demo_"):
-        return create_provider(account, {})
+    if account.provider_name not in SUPPORTED_PROVIDERS:
+        raise ValueError(f"unsupported provider account: {account.provider_name}")
     if not app_settings.credential_encryption_key:
         raise ValueError("credential encryption is not configured")
     cipher = CredentialCipher(app_settings.credential_encryption_key)
@@ -85,12 +87,52 @@ def provider_for_account(session: Session, app_settings: Settings, account: Prov
             ProviderAccountRepository(session, cipher).save_credentials(account, credentials)
             session.commit()
     if account.provider_name == "youtube_music":
-        credentials = {
-            **credentials,
-            "_oauth_client_id": app_settings.ytmusic_client_id,
-            "_oauth_client_secret": app_settings.ytmusic_client_secret,
-        }
+        credentials = _refresh_youtube_music_credentials(
+            session, app_settings, account, credentials
+        )
     return create_provider(account, credentials)
+
+
+def _refresh_youtube_music_credentials(
+    session: Session,
+    app_settings: Settings,
+    account: ProviderAccount,
+    credentials: dict[str, Any],
+) -> dict[str, Any]:
+    """Refresh an expired Google OAuth token before a YouTube Data API request."""
+
+    expires_at = credentials.get("expires_at")
+    try:
+        expired = not expires_at or datetime.fromisoformat(str(expires_at)).astimezone(
+            UTC
+        ) <= datetime.now(UTC)
+    except ValueError:
+        expired = True
+    if not expired:
+        return credentials
+    refresh_token = credentials.get("refresh_token")
+    if (
+        not refresh_token
+        or not app_settings.ytmusic_client_id
+        or not app_settings.ytmusic_client_secret
+    ):
+        raise ValueError("YouTube Music authorization expired; reconnect the account")
+    refreshed = YouTubeMusicAuthService(
+        app_settings.ytmusic_client_id, app_settings.ytmusic_client_secret
+    ).refresh_token(str(refresh_token))
+    merged = {
+        **credentials,
+        **refreshed,
+        "refresh_token": refreshed.get("refresh_token", refresh_token),
+        "expires_at": (
+            datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
+        ).isoformat(),
+    }
+    ProviderAccountRepository(
+        session, CredentialCipher(app_settings.credential_encryption_key or "")
+    ).save_credentials(account, merged)
+    session.commit()
+    return merged
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -100,6 +142,13 @@ def index(request: Request, app_settings: Annotated[Settings, Depends(settings)]
         name="index.html",
         context={"app_name": app_settings.app_name, "environment": app_settings.environment},
     )
+
+
+@router.get("/setup", response_class=HTMLResponse, include_in_schema=False)
+def setup_page(request: Request) -> HTMLResponse:
+    """Show the one-time provider setup instructions in a dedicated screen."""
+
+    return templates.TemplateResponse(request=request, name="setup.html")
 
 
 @router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
@@ -307,6 +356,9 @@ def youtube_music_complete(
         app_settings.ytmusic_client_secret,
     )
     token = service.exchange_device_code(device_code)
+    token["expires_at"] = (
+        datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
+    ).isoformat()
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
     )
@@ -316,67 +368,6 @@ def youtube_music_complete(
     account_repo.save_credentials(account, token)
     session.commit()
     return RedirectResponse("/pairs?connected=youtube_music", status_code=status.HTTP_303_SEE_OTHER)
-
-
-@router.post("/demo/seed", response_class=RedirectResponse, include_in_schema=False)
-def seed_demo_data(
-    session: Annotated[Session, Depends(get_db)],
-    _: Annotated[None, Depends(require_csrf)] = None,
-) -> RedirectResponse:
-    """Create local synthetic accounts and a pair for immediate GUI testing."""
-
-    reset_demo_state()
-    account_ids: dict[str, int] = {}
-    for provider_name in ("demo_spotify", "demo_youtube_music"):
-        account = session.scalar(
-            select(ProviderAccount).where(
-                ProviderAccount.provider_name == provider_name,
-                ProviderAccount.external_account_id == "local-demo-user",
-            )
-        )
-        if account is None:
-            account = ProviderAccount(
-                provider_name=provider_name,
-                external_account_id="local-demo-user",
-            )
-            session.add(account)
-            session.flush()
-        account_ids[provider_name] = account.id
-    pair_repo = SyncPairRepository(session)
-    demo_pair = next(
-        (
-            pair
-            for pair in pair_repo.all()
-            if pair.source_account_id == account_ids["demo_spotify"]
-            and pair.target_account_id == account_ids["demo_youtube_music"]
-        ),
-        None,
-    )
-    if demo_pair is None:
-        demo_pair = SyncPair(
-            source_account_id=account_ids["demo_spotify"],
-            target_account_id=account_ids["demo_youtube_music"],
-            source_playlist_id="spotify:demo-playlist",
-            target_playlist_id="youtube_music:demo-playlist",
-        )
-        session.add(demo_pair)
-        session.flush()
-    baseline_ids = select(SyncBaseline.id).where(SyncBaseline.pair_id == demo_pair.id)
-    run_ids = select(SyncRun.id).where(SyncRun.baseline_id.in_(baseline_ids))
-    session.execute(delete(SyncAction).where(SyncAction.run_id.in_(run_ids)))
-    session.execute(delete(SyncRun).where(SyncRun.baseline_id.in_(baseline_ids)))
-    session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == demo_pair.id))
-    session.commit()
-    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
-
-
-@router.post("/demo/change", response_class=RedirectResponse, include_in_schema=False)
-def change_demo_data(
-    change: Annotated[str, Form()],
-    _: Annotated[None, Depends(require_csrf)] = None,
-) -> RedirectResponse:
-    mutate_demo_state(change)
-    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/runs", response_class=HTMLResponse, include_in_schema=False)
@@ -394,33 +385,51 @@ def pairs(
     session: Annotated[Session, Depends(get_db)],
     connected: str | None = None,
     connection_error: str | None = None,
+    playlist_created: str | None = None,
+    source_selection: str | None = None,
+    target_selection: str | None = None,
+    initial_sync_policy: str | None = None,
 ) -> HTMLResponse:
     app_settings = load_app_settings(session)
-    accounts = list(session.scalars(select(ProviderAccount).order_by(ProviderAccount.id)))
-    connection_status = {
-        "spotify": all(
-            (
-                app_settings.session_secret,
-                app_settings.credential_encryption_key,
-                app_settings.spotify_client_id,
-                app_settings.spotify_client_secret,
-            )
-        ),
-        "youtube_music": all(
-            (
-                app_settings.session_secret,
-                app_settings.credential_encryption_key,
-                app_settings.ytmusic_client_id,
-                app_settings.ytmusic_client_secret,
-            )
-        ),
+    accounts = list(
+        session.scalars(
+            select(ProviderAccount)
+            .where(ProviderAccount.provider_name.in_(SUPPORTED_PROVIDERS))
+            .order_by(ProviderAccount.id)
+        )
+    )
+    provider_status = {
+        "spotify": {
+            "configured": all(
+                (
+                    app_settings.session_secret,
+                    app_settings.credential_encryption_key,
+                    app_settings.spotify_client_id,
+                    app_settings.spotify_client_secret,
+                )
+            ),
+            "connected": any(account.provider_name == "spotify" for account in accounts),
+        },
+        "youtube_music": {
+            "configured": all(
+                (
+                    app_settings.session_secret,
+                    app_settings.credential_encryption_key,
+                    app_settings.ytmusic_client_id,
+                    app_settings.ytmusic_client_secret,
+                )
+            ),
+            "connected": any(account.provider_name == "youtube_music" for account in accounts),
+        },
     }
     connection_message = {
-        "spotify": "Spotify connected. Choose playlists below to create a pair.",
-        "youtube_music": "YouTube Music connected. Choose playlists below to create a pair.",
+        "spotify": "Spotify is connected. Choose playlists below.",
+        "youtube_music": "YouTube Music is connected. Choose playlists below.",
     }.get(connected)
     if connection_error:
-        connection_message = "Connection was cancelled or rejected. You can safely try again."
+        connection_message = "The connection was cancelled or rejected. Try again when ready."
+    if playlist_created:
+        connection_message = "Playlist created. Choose both playlists, then create the pair."
     playlist_options = []
     provider_errors: dict[int, str] = {}
     for account in accounts:
@@ -431,7 +440,32 @@ def pairs(
             playlists = ()
             provider_errors[account.id] = str(exc)
         playlist_options.append({"account": account, "playlists": playlists})
-    configured_pairs = SyncPairRepository(session).all()
+    account_by_id = {account.id: account for account in accounts}
+    playlist_names = {
+        (group["account"].id, playlist.provider_playlist_id): playlist.name
+        for group in playlist_options
+        for playlist in group["playlists"]
+    }
+    configured_pairs = []
+    for pair in SyncPairRepository(session).all():
+        source_account = account_by_id.get(pair.source_account_id)
+        target_account = account_by_id.get(pair.target_account_id)
+        if source_account is None or target_account is None:
+            continue
+        configured_pairs.append(
+            {
+                "id": pair.id,
+                "enabled": pair.enabled,
+                "source_name": playlist_names.get(
+                    (source_account.id, pair.source_playlist_id), pair.source_playlist_id
+                ),
+                "source_provider": source_account.provider_name,
+                "target_name": playlist_names.get(
+                    (target_account.id, pair.target_playlist_id), pair.target_playlist_id
+                ),
+                "target_provider": target_account.provider_name,
+            }
+        )
     return templates.TemplateResponse(
         request=request,
         name="pairs.html",
@@ -439,40 +473,90 @@ def pairs(
             "accounts": accounts,
             "pairs": configured_pairs,
             "playlist_options": playlist_options,
-            "connection_status": connection_status,
+            "provider_status": provider_status,
             "connection_message": connection_message,
             "provider_errors": provider_errors,
+            "selected_source": source_selection or "",
+            "selected_target": target_selection or "",
+            "selected_policy": initial_sync_policy or InitialSyncPolicy.MERGE.value,
         },
     )
 
 
-@router.post("/pairs", response_class=RedirectResponse, include_in_schema=False)
+def _existing_playlist_selection(selection: str) -> tuple[int, str]:
+    try:
+        account_raw, playlist_id = selection.split("|", 1)
+        return int(account_raw), playlist_id
+    except (ValueError, TypeError) as exc:
+        raise HTTPException(status_code=400, detail="invalid playlist selection") from exc
+
+
+def _new_playlist_account(session: Session, selection: str) -> ProviderAccount:
+    try:
+        account_id = int(selection.removeprefix(NEW_PLAYLIST_PREFIX))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid new playlist selection") from exc
+    account = session.get(ProviderAccount, account_id)
+    if account is None or account.provider_name not in SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=404, detail="provider account not found")
+    return account
+
+
+@router.post("/pairs", response_class=HTMLResponse, response_model=None, include_in_schema=False)
 def create_pair(
+    request: Request,
     source_selection: Annotated[str, Form()],
     target_selection: Annotated[str, Form()],
     session: Annotated[Session, Depends(get_db)],
     initial_sync_policy: Annotated[str, Form()] = InitialSyncPolicy.MERGE.value,
     _: Annotated[None, Depends(require_csrf)] = None,
-) -> RedirectResponse:
-    try:
-        source_account_raw, source_playlist_id = source_selection.split("|", 1)
-        target_account_raw, target_playlist_id = target_selection.split("|", 1)
-        source_account_id = int(source_account_raw)
-        target_account_id = int(target_account_raw)
-    except (ValueError, TypeError) as exc:
-        raise HTTPException(status_code=400, detail="invalid playlist selection") from exc
-    if source_account_id == target_account_id:
-        raise HTTPException(status_code=400, detail="source and target accounts must differ")
-    source_account = session.get(ProviderAccount, source_account_id)
-    target_account = session.get(ProviderAccount, target_account_id)
-    if source_account is None or target_account is None:
-        raise HTTPException(status_code=404, detail="provider account not found")
+) -> HTMLResponse | RedirectResponse:
     try:
         policy = InitialSyncPolicy(initial_sync_policy)
     except ValueError as exc:
         raise HTTPException(
             status_code=400, detail="invalid initial synchronization policy"
         ) from exc
+    new_selections = [
+        ("source", source_selection, target_selection),
+        ("target", target_selection, source_selection),
+    ]
+    requested_new = [entry for entry in new_selections if entry[1].startswith(NEW_PLAYLIST_PREFIX)]
+    if requested_new:
+        if len(requested_new) != 1:
+            raise HTTPException(status_code=400, detail="create one new playlist at a time")
+        side, selection, other_selection = requested_new[0]
+        account = _new_playlist_account(session, selection)
+        other_account_id, _ = _existing_playlist_selection(other_selection)
+        if account.id == other_account_id:
+            raise HTTPException(
+                status_code=400,
+                detail="choose different services for the two sides of a pair",
+            )
+        return templates.TemplateResponse(
+            request=request,
+            name="create_playlist.html",
+            context={
+                "account": account,
+                "side": side,
+                "other_selection": other_selection,
+                "initial_sync_policy": policy.value,
+            },
+        )
+
+    source_account_id, source_playlist_id = _existing_playlist_selection(source_selection)
+    target_account_id, target_playlist_id = _existing_playlist_selection(target_selection)
+    if source_account_id == target_account_id:
+        raise HTTPException(status_code=400, detail="source and target accounts must differ")
+    source_account = session.get(ProviderAccount, source_account_id)
+    target_account = session.get(ProviderAccount, target_account_id)
+    if (
+        source_account is None
+        or target_account is None
+        or source_account.provider_name not in SUPPORTED_PROVIDERS
+        or target_account.provider_name not in SUPPORTED_PROVIDERS
+    ):
+        raise HTTPException(status_code=404, detail="provider account not found")
     session.add(
         SyncPair(
             source_account_id=source_account_id,
@@ -484,6 +568,57 @@ def create_pair(
     )
     session.commit()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/playlists", response_class=RedirectResponse, include_in_schema=False)
+def create_playlist(
+    session: Annotated[Session, Depends(get_db)],
+    app_settings: Annotated[Settings, Depends(settings)],
+    account_id: Annotated[int, Form()],
+    side: Annotated[str, Form()],
+    other_selection: Annotated[str, Form()],
+    initial_sync_policy: Annotated[str, Form()],
+    name: Annotated[str, Form()],
+    description: Annotated[str, Form()] = "",
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    """Create a private playlist on a connected provider, then return to pairing."""
+
+    if side not in {"source", "target"}:
+        raise HTTPException(status_code=400, detail="invalid playlist side")
+    try:
+        policy = InitialSyncPolicy(initial_sync_policy)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="invalid initial synchronization policy"
+        ) from exc
+    playlist_name = name.strip()
+    if not 1 <= len(playlist_name) <= 100:
+        raise HTTPException(
+            status_code=400, detail="playlist name must be between 1 and 100 characters"
+        )
+    account = session.get(ProviderAccount, account_id)
+    if account is None or account.provider_name not in SUPPORTED_PROVIDERS:
+        raise HTTPException(status_code=404, detail="provider account not found")
+    other_account_id, _ = _existing_playlist_selection(other_selection)
+    if account.id == other_account_id:
+        raise HTTPException(status_code=400, detail="choose different services for the two sides")
+    try:
+        playlist = provider_for_account(session, app_settings, account).create_playlist(
+            playlist_name, description.strip() or None
+        )
+    except (ProviderError, ValueError) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    created_selection = f"{account.id}|{playlist.provider_playlist_id}"
+    selections = (
+        {"source_selection": created_selection, "target_selection": other_selection}
+        if side == "source"
+        else {"source_selection": other_selection, "target_selection": created_selection}
+    )
+    selections.update({"initial_sync_policy": policy.value, "playlist_created": "1"})
+    return RedirectResponse(
+        f"/pairs?{urlencode(selections)}", status_code=status.HTTP_303_SEE_OTHER
+    )
 
 
 @router.post("/pairs/{pair_id}/toggle", response_class=RedirectResponse, include_in_schema=False)

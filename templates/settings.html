@@ -5,55 +5,21 @@
 {% block content %}
 <section class="hero compact-hero">
   <div>
-    <p class="eyebrow">LOCAL CONTROL CENTRE</p>
-    <h1>Configure OPS your way.</h1>
-    <p class="lede">Provider credentials and sync preferences are saved from this screen and encrypted before they reach SQLite.</p>
+    <p class="eyebrow">SETTINGS</p>
+    <h1>App settings.</h1>
+    <p class="lede">Add the app details for Spotify and Google here. Stored credentials are encrypted before they are saved.</p>
   </div>
   <div class="hero-orb orb-green" aria-hidden="true"></div>
 </section>
 
-{% if saved %}<div class="success-alert page-alert">Settings saved securely. Provider connection buttons are ready when both client credentials are present.</div>{% endif %}
-
-<section class="card setup-guide">
-  <div class="section-heading"><div><p class="eyebrow">ACCOUNT SETUP GUIDE</p><h2>Create the two OAuth clients</h2></div><span class="pill">browser only</span></div>
-  <p class="muted-copy">You create the developer applications in the providers' websites, then paste the resulting client values into the form below. OPS never asks for your Spotify or Google account password.</p>
-  <div class="guide-grid">
-    <article class="guide-step">
-      <div class="guide-number">01</div>
-      <h3>Spotify</h3>
-      <ol class="setup-list">
-        <li>Open the <a class="text-link" href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify Developer Dashboard ↗</a> and choose <strong>Create an App</strong>.</li>
-        <li>Open the app settings and add this exact redirect URI:</li>
-      </ol>
-      <p class="code-callout"><code>http://127.0.0.1:8000/auth/spotify/callback</code></p>
-      <ol class="setup-list" start="3">
-        <li>Copy the app's <strong>Client ID</strong> and <strong>Client Secret</strong> into the Spotify fields below.</li>
-        <li>Save this page, then use <strong>Connect Spotify</strong> on the Pairs page.</li>
-      </ol>
-      <p class="field-help">OPS requests private and collaborative playlist read access plus private and public playlist write access.</p>
-    </article>
-
-    <article class="guide-step">
-      <div class="guide-number guide-number-pink">02</div>
-      <h3>YouTube Music</h3>
-      <ol class="setup-list">
-        <li>Open <a class="text-link" href="https://console.cloud.google.com/projectcreate" target="_blank" rel="noreferrer">Google Cloud Console ↗</a> and create or select a project.</li>
-        <li>Enable <a class="text-link" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube Data API v3 ↗</a>.</li>
-        <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Credentials ↗</a>, create an <strong>OAuth client ID</strong>, and choose <strong>TVs and Limited Input devices</strong>.</li>
-        <li>Copy the client ID and secret into the YouTube Music fields below.</li>
-        <li>Save this page, then use <strong>Connect YouTube Music</strong> on the Pairs page.</li>
-      </ol>
-      <p class="field-help">OPS opens Google's verification page and displays a one-time code. Approve access there, then return to OPS and select “I completed authorization”.</p>
-    </article>
-  </div>
-  <div class="scope-callout"><strong>Access requested</strong><span>Spotify: playlist read/write scopes</span><span>YouTube Music: <code>https://www.googleapis.com/auth/youtube</code> read/write scope</span></div>
-</section>
+{% if saved %}<div class="success-alert page-alert">Settings saved. You can now connect each service from the Playlists page.</div>{% endif %}
+<section class="card"><p class="muted-copy">Need the developer-platform steps or redirect addresses? <a class="text-link" href="/setup">Open the setup guide →</a></p></section>
 
 <form method="post" action="/settings">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <section class="grid two-up">
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble green">●</span><div><h2>Spotify</h2><p>OAuth client used for playlist read and write access.</p></div></div>
+      <div class="card-heading"><span class="icon-bubble green">●</span><div><h2>Spotify</h2><p>Client details for playlist access.</p></div></div>
       <label>Client ID
         <input name="spotify_client_id" value="{{ spotify_client_id }}" autocomplete="off" placeholder="Paste Spotify client ID">
       </label>
@@ -64,11 +30,11 @@
         <input name="spotify_redirect_uri" value="{{ spotify_redirect_uri }}" autocomplete="url">
       </label>
       <label class="checkbox-label"><input type="checkbox" name="clear_spotify_secret" value="1"> Clear saved Spotify secret</label>
-      <p class="field-help">Register the redirect URI exactly as shown in your Spotify app.</p>
+      <p class="field-help">Register this redirect address exactly as shown.</p>
     </article>
 
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2>YouTube Music</h2><p>OAuth client used for library read and write access.</p></div></div>
+      <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2>YouTube Music</h2><p>Google OAuth client for playlist access.</p></div></div>
       <label>Google OAuth client ID
         <input name="ytmusic_client_id" value="{{ ytmusic_client_id }}" autocomplete="off" placeholder="Paste Google OAuth client ID">
       </label>
@@ -76,27 +42,27 @@
         <input type="password" name="ytmusic_client_secret" autocomplete="new-password" placeholder="Leave blank to keep the saved secret">
       </label>
       <label class="checkbox-label"><input type="checkbox" name="clear_ytmusic_secret" value="1"> Clear saved YouTube Music secret</label>
-      <p class="field-help">Create the OAuth client and enable YouTube Data API access before connecting.</p>
+      <p class="field-help">Enable YouTube Data API v3 before connecting.</p>
     </article>
   </section>
 
   <section class="grid two-up">
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble green">↻</span><div><h2>Sync schedule</h2><p>OPS only creates safe previews automatically.</p></div></div>
+      <div class="card-heading"><span class="icon-bubble green">↻</span><div><h2>Sync schedule</h2><p>Automatic checks create previews only.</p></div></div>
       <label class="checkbox-label"><input type="checkbox" name="scheduler_enabled" value="1"{% if scheduler_enabled %} checked{% endif %}> Enable scheduled preview checks</label>
       <label>Check interval, in minutes
         <input type="number" name="sync_interval_minutes" min="1" max="1440" value="{{ sync_interval_minutes }}">
       </label>
-      <p class="field-help">Scheduled checks never approve destructive changes automatically.</p>
+      <p class="field-help">Automatic checks never remove tracks.</p>
     </article>
 
     <article class="card accent-card">
-      <div class="card-heading"><span class="icon-bubble red">▣</span><div><h2>Local security</h2><p>Managed automatically for this installation.</p></div></div>
-      <p class="muted-copy">OPS creates its local session and encryption keys on first start and keeps them in the persistent data volume. Provider client credentials and OAuth tokens are encrypted before database storage.</p>
-      <p class="muted-copy">Keep this service private or behind your own trusted network access. OPS has no telemetry or hosted account.</p>
+      <div class="card-heading"><span class="icon-bubble red">▣</span><div><h2>Privacy</h2><p>Managed automatically on this server.</p></div></div>
+      <p class="muted-copy">OPS creates its local security keys on first start. Provider details and tokens are encrypted before storage.</p>
+      <p class="muted-copy">Keep OPS private or behind trusted network access. It has no telemetry or hosted account.</p>
     </article>
   </section>
 
-  <div class="hero-actions"><button class="button primary" type="submit">Save settings</button><a class="button ghost" href="/pairs">Back to pairs</a></div>
+  <div class="hero-actions"><button class="button primary" type="submit">Save settings</button><a class="button ghost" href="/pairs">Back to playlists</a></div>
 </form>
 {% endblock %}

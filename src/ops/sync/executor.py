@@ -47,6 +47,7 @@ class SyncExecutor:
         target_playlist_id: str,
         approval: Approval | None = None,
         on_action_completed: Callable[[int], None] | None = None,
+        on_track_resolved: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
     ) -> None:
         validate_approval(plan, approval)
         prepared: list[tuple[ReconciliationAction, ProviderTrack]] = []
@@ -66,6 +67,8 @@ class SyncExecutor:
             playlist_id = source_playlist_id if action.side is Side.SOURCE else target_playlist_id
             if action.action is ActionType.ADD_TRACK:
                 provider.add_tracks(playlist_id, [provider_track])
+                if on_track_resolved is not None:
+                    on_track_resolved(action, provider_track)
             else:
                 provider.remove_tracks(playlist_id, [provider_track])
             if on_action_completed is not None:

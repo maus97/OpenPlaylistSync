@@ -16,6 +16,7 @@ def test_spotify_authorization_url_contains_state_and_scopes() -> None:
     assert state == "state-value"
     assert query["client_id"] == ["client-id"]
     assert query["state"] == ["state-value"]
+    assert "user-read-private" in query["scope"][0]
     assert "playlist-read-private" in query["scope"][0]
     assert "playlist-read-collaborative" in query["scope"][0]
     assert "playlist-modify-private" in query["scope"][0]
