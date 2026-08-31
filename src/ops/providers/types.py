@@ -13,6 +13,8 @@ class ProviderTrack:
     album: str | None = None
     duration_ms: int | None = None
     isrc: str | None = None
+    occurrence_id: str | None = None
+    position: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

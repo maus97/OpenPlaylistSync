@@ -7,7 +7,14 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ops.models import AppConfiguration, ProviderAccount, SyncBaseline, SyncPair, SyncRun
+from ops.models import (
+    AppConfiguration,
+    ProviderAccount,
+    SyncAction,
+    SyncBaseline,
+    SyncPair,
+    SyncRun,
+)
 from ops.security.crypto import CredentialCipher
 
 
@@ -125,14 +132,27 @@ class SyncRunRepository:
     def __init__(self, session: Session) -> None:
         self.session = session
 
-    def start(self, baseline_id: int | None = None) -> SyncRun:
-        run = SyncRun(baseline_id=baseline_id, status="running")
+    def start(
+        self,
+        baseline_id: int | None = None,
+        *,
+        pair_id: int | None = None,
+        fingerprint: str | None = None,
+    ) -> SyncRun:
+        run = SyncRun(
+            baseline_id=baseline_id,
+            pair_id=pair_id,
+            plan_fingerprint=fingerprint,
+            status="running",
+        )
         self.session.add(run)
         self.session.flush()
         return run
 
     def recent(self, limit: int = 20) -> list[SyncRun]:
-        statement = select(SyncRun).order_by(SyncRun.started_at.desc()).limit(limit)
+        statement = (
+            select(SyncRun).order_by(SyncRun.started_at.desc(), SyncRun.id.desc()).limit(limit)
+        )
         return list(self.session.scalars(statement))
 
     def finish(self, run: SyncRun, status: str, summary_json: str | None = None) -> SyncRun:
@@ -142,3 +162,46 @@ class SyncRunRepository:
         self.session.add(run)
         self.session.flush()
         return run
+
+
+class SyncActionRepository:
+    """Store per-action execution progress for inspection and recovery."""
+
+    def __init__(self, session: Session) -> None:
+        self.session = session
+
+    def plan(
+        self, run: SyncRun, ordinal: int, provider_name: str, operation: str, track_key: str
+    ) -> SyncAction:
+        action = SyncAction(
+            run_id=run.id,
+            ordinal=ordinal,
+            provider_name=provider_name,
+            operation=operation,
+            track_key=track_key,
+            status="planned",
+        )
+        self.session.add(action)
+        self.session.flush()
+        return action
+
+    def complete(self, action: SyncAction) -> SyncAction:
+        action.status = "completed"
+        action.completed_at = datetime.now().astimezone()
+        self.session.add(action)
+        self.session.flush()
+        return action
+
+    def fail(self, action: SyncAction, error: str) -> SyncAction:
+        action.status = "failed"
+        action.error_summary = error[:500]
+        action.completed_at = datetime.now().astimezone()
+        self.session.add(action)
+        self.session.flush()
+        return action
+
+    def for_run(self, run_id: int) -> list[SyncAction]:
+        statement = (
+            select(SyncAction).where(SyncAction.run_id == run_id).order_by(SyncAction.ordinal)
+        )
+        return list(self.session.scalars(statement))

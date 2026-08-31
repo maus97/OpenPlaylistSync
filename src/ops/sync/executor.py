@@ -1,6 +1,6 @@
 """Apply approved reconciliation plans through provider adapters."""
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Protocol
 
 from ops.providers.types import ProviderTrack
@@ -29,6 +29,8 @@ def _provider_track(track: TrackState) -> ProviderTrack:
         artists=track.artists,
         duration_ms=track.duration_ms,
         isrc=track.isrc,
+        occurrence_id=track.occurrence_id,
+        position=track.position,
     )
 
 
@@ -44,6 +46,7 @@ class SyncExecutor:
         source_playlist_id: str,
         target_playlist_id: str,
         approval: Approval | None = None,
+        on_action_completed: Callable[[int], None] | None = None,
     ) -> None:
         validate_approval(plan, approval)
         prepared: list[tuple[ReconciliationAction, ProviderTrack]] = []
@@ -58,10 +61,12 @@ class SyncExecutor:
                 provider_track = resolved
             prepared.append((action, provider_track))
 
-        for action, provider_track in prepared:
+        for index, (action, provider_track) in enumerate(prepared):
             provider = source_provider if action.side is Side.SOURCE else target_provider
             playlist_id = source_playlist_id if action.side is Side.SOURCE else target_playlist_id
             if action.action is ActionType.ADD_TRACK:
                 provider.add_tracks(playlist_id, [provider_track])
             else:
                 provider.remove_tracks(playlist_id, [provider_track])
+            if on_action_completed is not None:
+                on_action_completed(index)

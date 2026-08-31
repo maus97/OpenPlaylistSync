@@ -10,7 +10,7 @@
     <p class="lede">A calm, local-first command centre for keeping Spotify and YouTube Music playlists in step — with every change visible before it happens.</p>
     <div class="hero-actions">
       <a class="button primary" href="/pairs">Open workspace</a>
-      <form method="post" action="/demo/seed"><button class="button secondary" type="submit">Try local demo</button></form>
+      <form method="post" action="/demo/seed"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button secondary" type="submit">Try local demo</button></form>
     </div>
   </div>
   <div class="hero-orb orb-green" aria-hidden="true"></div>

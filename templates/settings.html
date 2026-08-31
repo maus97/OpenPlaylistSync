@@ -50,6 +50,7 @@
 </section>
 
 <form method="post" action="/settings">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <section class="grid two-up">
     <article class="card">
       <div class="card-heading"><span class="icon-bubble green">●</span><div><h2>Spotify</h2><p>OAuth client used for playlist read and write access.</p></div></div>

@@ -1,6 +1,7 @@
 """HTTP routes for health, operator flows, and the safety-first UI."""
 
 import os
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -15,16 +16,20 @@ from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
-from ops.models import ProviderAccount, SyncBaseline, SyncPair, SyncRun
+from ops.models import ProviderAccount, SyncAction, SyncBaseline, SyncPair, SyncRun
+from ops.providers.base import ProviderError
 from ops.providers.demo import mutate_demo_state, reset_demo_state
 from ops.providers.factory import create_provider
 from ops.security.crypto import CredentialCipher, CredentialEncryptionError
+from ops.security.csrf import csrf_context, require_csrf
 from ops.storage.repositories import (
     ProviderAccountRepository,
     SyncPairRepository,
     SyncRunRepository,
 )
 from ops.sync.coordinator import SyncCoordinator
+from ops.sync.domain import InitialSyncPolicy
+from ops.sync.executor import PlanExecutionError
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 
 router = APIRouter()
@@ -33,6 +38,7 @@ templates = Jinja2Templates(
         "OPS_TEMPLATES_DIR", str(Path(__file__).resolve().parents[3] / "templates")
     )
 )
+templates.context_processors.append(csrf_context)
 
 
 def settings(session: Annotated[Session, Depends(get_db)]) -> Settings:
@@ -48,6 +54,36 @@ def provider_for_account(session: Session, app_settings: Settings, account: Prov
         raise ValueError("credential encryption is not configured")
     cipher = CredentialCipher(app_settings.credential_encryption_key)
     credentials = ProviderAccountRepository(session, cipher).load_credentials(account)
+    if account.provider_name == "spotify" and credentials.get("expires_at"):
+        try:
+            expires_at = datetime.fromisoformat(str(credentials["expires_at"])).astimezone(UTC)
+        except ValueError:
+            expires_at = datetime.now(UTC)
+        if expires_at <= datetime.now(UTC):
+            refresh_token = credentials.get("refresh_token")
+            if (
+                not refresh_token
+                or not app_settings.spotify_client_id
+                or not app_settings.spotify_client_secret
+            ):
+                raise ValueError("Spotify authorization expired; reconnect the account")
+            refreshed = SpotifyOAuthService(
+                SpotifyOAuthConfig(
+                    app_settings.spotify_client_id,
+                    app_settings.spotify_client_secret,
+                    app_settings.spotify_redirect_uri,
+                )
+            ).refresh_token(str(refresh_token))
+            credentials = {
+                **credentials,
+                **refreshed,
+                "refresh_token": refreshed.get("refresh_token", refresh_token),
+                "expires_at": (
+                    datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
+                ).isoformat(),
+            }
+            ProviderAccountRepository(session, cipher).save_credentials(account, credentials)
+            session.commit()
     if account.provider_name == "youtube_music":
         credentials = {
             **credentials,
@@ -104,6 +140,7 @@ def save_settings_route(
     clear_ytmusic_secret: Annotated[str | None, Form()] = None,
     scheduler_enabled: Annotated[str | None, Form()] = None,
     sync_interval_minutes: Annotated[int, Form()] = 60,
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     """Encrypt and save provider and scheduler settings submitted by the UI."""
 
@@ -175,13 +212,19 @@ def spotify_start(
 @router.get("/auth/spotify/callback", include_in_schema=False)
 def spotify_callback(
     request: Request,
-    code: str,
-    state: str,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
+    code: str | None = None,
+    state: str | None = None,
+    error: str | None = None,
 ) -> RedirectResponse:
+    if error:
+        request.session.pop("spotify_oauth_state", None)
+        return RedirectResponse(
+            f"/pairs?connection_error=spotify_{error}", status_code=status.HTTP_303_SEE_OTHER
+        )
     expected_state = request.session.pop("spotify_oauth_state", None)
-    if not expected_state or state != expected_state:
+    if not code or not expected_state or state != expected_state:
         raise HTTPException(status_code=400, detail="invalid Spotify OAuth state")
     if not all(
         (
@@ -199,6 +242,9 @@ def spotify_callback(
         )
     )
     token = service.exchange_code(code)
+    token["expires_at"] = (
+        datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
+    ).isoformat()
     profile = service.current_user(token["access_token"])
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
@@ -273,7 +319,10 @@ def youtube_music_complete(
 
 
 @router.post("/demo/seed", response_class=RedirectResponse, include_in_schema=False)
-def seed_demo_data(session: Annotated[Session, Depends(get_db)]) -> RedirectResponse:
+def seed_demo_data(
+    session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
     """Create local synthetic accounts and a pair for immediate GUI testing."""
 
     reset_demo_state()
@@ -313,6 +362,8 @@ def seed_demo_data(session: Annotated[Session, Depends(get_db)]) -> RedirectResp
         session.add(demo_pair)
         session.flush()
     baseline_ids = select(SyncBaseline.id).where(SyncBaseline.pair_id == demo_pair.id)
+    run_ids = select(SyncRun.id).where(SyncRun.baseline_id.in_(baseline_ids))
+    session.execute(delete(SyncAction).where(SyncAction.run_id.in_(run_ids)))
     session.execute(delete(SyncRun).where(SyncRun.baseline_id.in_(baseline_ids)))
     session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == demo_pair.id))
     session.commit()
@@ -320,7 +371,10 @@ def seed_demo_data(session: Annotated[Session, Depends(get_db)]) -> RedirectResp
 
 
 @router.post("/demo/change", response_class=RedirectResponse, include_in_schema=False)
-def change_demo_data(change: Annotated[str, Form()]) -> RedirectResponse:
+def change_demo_data(
+    change: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
     mutate_demo_state(change)
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -339,6 +393,7 @@ def pairs(
     request: Request,
     session: Annotated[Session, Depends(get_db)],
     connected: str | None = None,
+    connection_error: str | None = None,
 ) -> HTMLResponse:
     app_settings = load_app_settings(session)
     accounts = list(session.scalars(select(ProviderAccount).order_by(ProviderAccount.id)))
@@ -364,13 +419,17 @@ def pairs(
         "spotify": "Spotify connected. Choose playlists below to create a pair.",
         "youtube_music": "YouTube Music connected. Choose playlists below to create a pair.",
     }.get(connected)
+    if connection_error:
+        connection_message = "Connection was cancelled or rejected. You can safely try again."
     playlist_options = []
+    provider_errors: dict[int, str] = {}
     for account in accounts:
         try:
             provider = provider_for_account(session, app_settings, account)
             playlists = provider.list_playlists()
-        except Exception:
+        except (ProviderError, ValueError) as exc:
             playlists = ()
+            provider_errors[account.id] = str(exc)
         playlist_options.append({"account": account, "playlists": playlists})
     configured_pairs = SyncPairRepository(session).all()
     return templates.TemplateResponse(
@@ -382,6 +441,7 @@ def pairs(
             "playlist_options": playlist_options,
             "connection_status": connection_status,
             "connection_message": connection_message,
+            "provider_errors": provider_errors,
         },
     )
 
@@ -391,6 +451,8 @@ def create_pair(
     source_selection: Annotated[str, Form()],
     target_selection: Annotated[str, Form()],
     session: Annotated[Session, Depends(get_db)],
+    initial_sync_policy: Annotated[str, Form()] = InitialSyncPolicy.MERGE.value,
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     try:
         source_account_raw, source_playlist_id = source_selection.split("|", 1)
@@ -405,14 +467,80 @@ def create_pair(
     target_account = session.get(ProviderAccount, target_account_id)
     if source_account is None or target_account is None:
         raise HTTPException(status_code=404, detail="provider account not found")
+    try:
+        policy = InitialSyncPolicy(initial_sync_policy)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail="invalid initial synchronization policy"
+        ) from exc
     session.add(
         SyncPair(
             source_account_id=source_account_id,
             target_account_id=target_account_id,
             source_playlist_id=source_playlist_id,
             target_playlist_id=target_playlist_id,
+            initial_sync_policy=policy.value,
         )
     )
+    session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/pairs/{pair_id}/toggle", response_class=RedirectResponse, include_in_schema=False)
+def toggle_pair(
+    pair_id: int,
+    session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    pair.enabled = not pair.enabled
+    session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/pairs/{pair_id}/delete", response_class=RedirectResponse, include_in_schema=False)
+def delete_pair(
+    pair_id: int,
+    session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    baseline_ids = select(SyncBaseline.id).where(SyncBaseline.pair_id == pair.id)
+    run_ids = select(SyncRun.id).where(
+        (SyncRun.pair_id == pair.id) | (SyncRun.baseline_id.in_(baseline_ids))
+    )
+    session.execute(delete(SyncAction).where(SyncAction.run_id.in_(run_ids)))
+    session.execute(delete(SyncRun).where(SyncRun.id.in_(run_ids)))
+    session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == pair.id))
+    session.delete(pair)
+    session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post(
+    "/accounts/{provider_name}/disconnect",
+    response_class=RedirectResponse,
+    include_in_schema=False,
+)
+def disconnect_provider(
+    provider_name: str,
+    session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    account = session.scalar(
+        select(ProviderAccount)
+        .where(ProviderAccount.provider_name == provider_name)
+        .order_by(ProviderAccount.updated_at.desc(), ProviderAccount.id.desc())
+        .limit(1)
+    )
+    if account is None:
+        raise HTTPException(status_code=404, detail="provider account not found")
+    account.credentials_ciphertext = None
+    account.credential_key_id = None
     session.commit()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -429,7 +557,7 @@ def sync_plan(
         raise HTTPException(status_code=404, detail="sync pair not found")
     try:
         plan = SyncCoordinator(session, app_settings, create_provider).preview(pair)
-    except (ValueError, CredentialEncryptionError) as exc:
+    except (ValueError, CredentialEncryptionError, ProviderError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return templates.TemplateResponse(
         request=request,
@@ -443,13 +571,14 @@ def establish_sync_baseline(
     pair_id: int,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     pair = SyncPairRepository(session).get(pair_id)
     if pair is None:
         raise HTTPException(status_code=404, detail="sync pair not found")
     try:
-        SyncCoordinator(session, app_settings, create_provider).establish_baseline(pair)
-    except (ValueError, CredentialEncryptionError) as exc:
+        SyncCoordinator(session, app_settings, create_provider).accept_current_state(pair)
+    except (ValueError, CredentialEncryptionError, ProviderError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -462,6 +591,7 @@ def apply_sync_plan(
     session: Annotated[Session, Depends(get_db)],
     confirmation: Annotated[str, Form()] = "",
     fingerprint: Annotated[str, Form()] = "",
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse:
     pair = SyncPairRepository(session).get(pair_id)
     if pair is None:
@@ -476,7 +606,13 @@ def apply_sync_plan(
             plan,
             Approval(plan_fingerprint=fingerprint, confirmation=confirmation),
         )
-    except (ValueError, CredentialEncryptionError, DestructiveActionApprovalError) as exc:
+    except (
+        ValueError,
+        CredentialEncryptionError,
+        DestructiveActionApprovalError,
+        PlanExecutionError,
+        ProviderError,
+    ) as exc:
         error = str(exc)
     if error is None:
         return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)

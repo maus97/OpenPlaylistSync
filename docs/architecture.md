@@ -11,6 +11,10 @@ This document describes the implementation boundary for the runnable
 operator-assisted milestone. Provider authentication is initiated from the
 local UI, while synchronization remains reviewable and safety-gated.
 
+The [technical completion guide](technical-completion-guide.md) records the
+audited gaps, implementation sequence, release tests, and production definition
+of done for the work beyond this milestone.
+
 ## Goals and non-goals
 
 ### Goals
@@ -75,6 +79,13 @@ read operations, and write operations for Spotify and YouTube Music. Writes are
 only reachable through the safety executor, which preflights the complete plan,
 rejects conflicts and stale fingerprints, and requires an explicit phrase for
 destructive actions.
+
+Snapshots preserve playlist occurrences rather than collapsing duplicate songs.
+Spotify positions and YouTube Music `setVideoId` values remain attached to an
+occurrence so a reviewed removal can target one exact provider item. Initial
+synchronization has an explicit persisted policy: merge, source-led,
+target-led, or accept-as-is. The first three modes add only; no initial policy
+can infer a deletion.
 
 ### `src/ops/sync/`
 
@@ -149,6 +160,11 @@ The engine combines those changes into a plan:
 The baseline is advanced only after all selected operations succeed and the
 resulting snapshots are persisted. Failed or partially applied runs must remain
 visible and must not become the next baseline.
+
+The execution path records a `sync_run` and one `sync_action` entry per provider
+operation before the first write. An action is marked complete immediately after
+its provider call. A failed action leaves the run and its completed predecessors
+visible for review; OPS never advances the baseline for that run.
 
 ## Persistence direction
 

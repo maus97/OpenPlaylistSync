@@ -10,14 +10,14 @@ WORKDIR /app
 
 RUN addgroup --system ops && adduser --system --ingroup ops ops
 
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md requirements.lock ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./
 COPY templates ./templates
 COPY static ./static
 
-RUN pip install --no-cache-dir . \
+RUN pip install --no-cache-dir -r requirements.lock . \
     && mkdir -p /data \
     && chown -R ops:ops /app /data
 

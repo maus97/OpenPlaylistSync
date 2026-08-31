@@ -61,3 +61,27 @@ def test_spotify_provider_maps_read_only_playlist_response() -> None:
     assert snapshot.tracks[0].isrc == "US-AAA-00-00001"
     assert resolved is not None
     assert resolved.provider_track_id == "spotify:track-1"
+
+
+def test_spotify_provider_follows_playlist_pages() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/v1/me/playlists" and request.url.params.get("offset") is None:
+            return httpx.Response(
+                200,
+                json={
+                    "items": [{"id": "playlist-1", "name": "First"}],
+                    "next": "https://api.spotify.com/v1/me/playlists?offset=50",
+                },
+            )
+        if request.url.path == "/v1/me/playlists":
+            return httpx.Response(200, json={"items": [{"id": "playlist-2", "name": "Second"}]})
+        return httpx.Response(404)
+
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    assert [playlist.name for playlist in provider.list_playlists()] == ["First", "Second"]

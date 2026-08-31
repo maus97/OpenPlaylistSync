@@ -18,6 +18,8 @@ def _playlist_to_dict(playlist: PlaylistState) -> dict[str, object]:
                 "source_provider_track_id": track.source_provider_track_id,
                 "duration_ms": track.duration_ms,
                 "isrc": track.isrc,
+                "occurrence_id": track.occurrence_id,
+                "position": track.position,
             }
             for track in playlist.tracks
         ],
@@ -33,6 +35,8 @@ def _playlist_from_dict(payload: dict[str, object]) -> PlaylistState:
             source_provider_track_id=str(track["source_provider_track_id"]),
             duration_ms=track.get("duration_ms"),
             isrc=track.get("isrc"),
+            occurrence_id=track.get("occurrence_id"),
+            position=track.get("position"),
         )
         for track in payload["tracks"]
     )

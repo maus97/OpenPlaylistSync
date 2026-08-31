@@ -2,6 +2,7 @@ from ops.providers.types import ProviderPlaylist, ProviderTrack
 from ops.sync.domain import (
     ActionType,
     BaselineState,
+    InitialSyncPolicy,
     PlaylistState,
     Side,
     reconcile,
@@ -27,12 +28,36 @@ def baseline() -> BaselineState:
     return BaselineState(source=source, target=target)
 
 
-def test_initial_sync_is_preview_only() -> None:
+def test_initial_merge_is_non_destructive_and_safe_to_apply() -> None:
     plan = reconcile(None, baseline().source, baseline().target)
 
     assert plan.initial_sync is True
     assert plan.actions == ()
-    assert plan.safe_to_apply is False
+    assert plan.safe_to_apply is True
+
+
+def test_initial_merge_adds_missing_tracks_to_both_sides() -> None:
+    source = playlist("spotify", (track("s-one", "One"), track("s-two", "Two")))
+    target = playlist("youtube_music", (track("y-one", "One"), track("y-three", "Three")))
+
+    plan = reconcile(None, source, target)
+
+    assert plan.initial_policy is InitialSyncPolicy.MERGE
+    assert {(action.side, action.track.title) for action in plan.actions} == {
+        (Side.SOURCE, "Three"),
+        (Side.TARGET, "Two"),
+    }
+    assert not plan.destructive_actions
+
+
+def test_duplicate_occurrence_addition_is_not_collapsed() -> None:
+    source = playlist("spotify", (track("s-one", "One"), track("s-one-2", "One")))
+    target = playlist("youtube_music", (track("y-one", "One"),))
+
+    plan = reconcile(None, source, target)
+
+    assert len(plan.actions) == 1
+    assert plan.actions[0].side is Side.TARGET
 
 
 def test_source_addition_is_proposed_for_target() -> None:

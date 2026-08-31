@@ -31,10 +31,10 @@ def plan_fingerprint(plan: ReconciliationPlan) -> str:
 def validate_approval(plan: ReconciliationPlan, approval: Approval | None) -> None:
     """Reject conflicts, initial plans, stale plans, or missing confirmation."""
 
-    if plan.initial_sync:
-        raise DestructiveActionApprovalError("initial synchronization requires a review plan")
     if plan.conflicts:
         raise DestructiveActionApprovalError("conflicts must be resolved before applying a plan")
+    if plan.initial_sync and plan.destructive_actions:
+        raise DestructiveActionApprovalError("initial synchronization can never remove tracks")
     if not plan.requires_approval:
         return
     if approval is None or approval.confirmation != "APPLY DESTRUCTIVE CHANGES":

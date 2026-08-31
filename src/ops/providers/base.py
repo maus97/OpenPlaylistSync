@@ -6,6 +6,30 @@ from typing import Protocol, runtime_checkable
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
 
+class ProviderError(RuntimeError):
+    """A provider operation failed in a way the coordinator can report safely."""
+
+
+class AuthorizationRequired(ProviderError):
+    """The account needs to be connected again from the GUI."""
+
+
+class RateLimited(ProviderError):
+    """The provider asked OPS to wait before retrying."""
+
+    def __init__(self, retry_after_seconds: int | None = None) -> None:
+        self.retry_after_seconds = retry_after_seconds
+        super().__init__("provider rate limit reached")
+
+
+class ProviderUnavailable(ProviderError):
+    """A temporary provider/network failure occurred."""
+
+
+class TrackUnavailable(ProviderError):
+    """A requested track cannot be found on the destination provider."""
+
+
 @runtime_checkable
 class MusicProvider(Protocol):
     """Mockable provider contract; implementations must not leak SDK types."""

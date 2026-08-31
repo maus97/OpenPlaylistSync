@@ -1,14 +1,17 @@
-"""Spotify provider adapter with injectable HTTP transport."""
+"""Spotify Web API adapter with paging, scoring, and injectable HTTP transport."""
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
+from typing import Any
 
 import httpx
 
+from ops.providers.base import AuthorizationRequired, ProviderUnavailable, RateLimited
 from ops.providers.types import ProviderPlaylist, ProviderTrack
+from ops.sync.matching import choose_best_candidate
 
 
 class SpotifyProvider:
-    """Spotify adapter with injectable HTTP transport and guarded writes."""
+    """Spotify adapter; all provider responses are converted to neutral values."""
 
     name = "spotify"
 
@@ -18,51 +21,81 @@ class SpotifyProvider:
 
     def _headers(self) -> dict[str, str]:
         if not self.access_token:
-            raise ValueError("Spotify access token is required")
+            raise AuthorizationRequired("Spotify account needs to be connected")
         return {"Authorization": f"Bearer {self.access_token}"}
 
-    def list_playlists(self) -> Sequence[ProviderPlaylist]:
-        response = self.client.get("/me/playlists", headers=self._headers(), params={"limit": 50})
+    def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        headers = {**self._headers(), **kwargs.pop("headers", {})}
+        try:
+            response = self.client.request(method, url, headers=headers, **kwargs)
+        except httpx.HTTPError as exc:
+            raise ProviderUnavailable("Spotify could not be reached") from exc
+        if response.status_code == 401:
+            raise AuthorizationRequired("Spotify authorization expired; reconnect the account")
+        if response.status_code == 429:
+            retry_after = response.headers.get("Retry-After")
+            raise RateLimited(int(retry_after) if retry_after and retry_after.isdigit() else None)
+        if response.status_code >= 500:
+            raise ProviderUnavailable("Spotify is temporarily unavailable")
         response.raise_for_status()
+        return response
+
+    @staticmethod
+    def _track(item: dict[str, Any], position: int | None = None) -> ProviderTrack | None:
+        track = item.get("track", item)
+        if not track or not track.get("id") or track.get("type", "track") != "track":
+            return None
+        return ProviderTrack(
+            provider_track_id=f"spotify:{track['id']}",
+            title=track.get("name", ""),
+            artists=tuple(artist.get("name", "") for artist in track.get("artists", [])),
+            album=(track.get("album") or {}).get("name"),
+            duration_ms=track.get("duration_ms"),
+            isrc=(track.get("external_ids") or {}).get("isrc"),
+            occurrence_id=str(position) if position is not None else None,
+            position=position,
+        )
+
+    def _pages(
+        self, first_payload: dict[str, Any], items_key: str = "items"
+    ) -> Iterable[dict[str, Any]]:
+        payload = first_payload
+        while True:
+            yield from payload.get(items_key, [])
+            next_url = payload.get("next")
+            if not next_url:
+                return
+            payload = self._request("GET", next_url).json()
+
+    def list_playlists(self) -> Sequence[ProviderPlaylist]:
+        payload = self._request("GET", "/me/playlists", params={"limit": 50}).json()
         return tuple(
             ProviderPlaylist(
-                provider_playlist_id=f"spotify:{item['id']}",
-                name=item["name"],
-                tracks=(),
+                provider_playlist_id=f"spotify:{item['id']}", name=item.get("name", ""), tracks=()
             )
-            for item in response.json().get("items", [])
+            for item in self._pages(payload)
+            if item.get("id")
         )
 
     def get_playlist(self, playlist_id: str) -> ProviderPlaylist:
         raw_id = playlist_id.removeprefix("spotify:")
-        response = self.client.get(
+        payload = self._request(
+            "GET",
             f"/playlists/{raw_id}",
-            headers=self._headers(),
             params={
                 "fields": (
-                    "id,name,description,"
-                    "tracks.items(track(id,name,artists(name),album(name),duration_ms,"
-                    "external_ids(isrc)))"
-                )
+                    "id,name,description,tracks(items(track(id,name,artists(name),album(name),duration_ms,"
+                    "external_ids(isrc),type)),next)"
+                ),
+                "market": "from_token",
             },
-        )
-        response.raise_for_status()
-        payload = response.json()
-        tracks = []
-        for item in payload.get("tracks", {}).get("items", []):
-            track = item.get("track") or {}
-            if not track.get("id"):
-                continue
-            tracks.append(
-                ProviderTrack(
-                    provider_track_id=f"spotify:{track['id']}",
-                    title=track.get("name", ""),
-                    artists=tuple(artist.get("name", "") for artist in track.get("artists", [])),
-                    album=(track.get("album") or {}).get("name"),
-                    duration_ms=track.get("duration_ms"),
-                    isrc=(track.get("external_ids") or {}).get("isrc"),
-                )
-            )
+        ).json()
+        tracks_payload = payload.get("tracks", {})
+        tracks: list[ProviderTrack] = []
+        for position, item in enumerate(self._pages(tracks_payload)):
+            track = self._track(item, position)
+            if track is not None:
+                tracks.append(track)
         return ProviderPlaylist(
             provider_playlist_id=f"spotify:{payload['id']}",
             name=payload.get("name", ""),
@@ -72,63 +105,60 @@ class SpotifyProvider:
 
     def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
         query = f'track:"{track.title}" artist:"{track.artists[0] if track.artists else ""}"'
-        response = self.client.get(
+        payload = self._request(
+            "GET",
             "/search",
-            headers=self._headers(),
-            params={"q": query, "type": "track", "limit": 1},
+            params={"q": query, "type": "track", "limit": 10, "market": "from_token"},
+        ).json()
+        candidates = tuple(
+            candidate
+            for item in payload.get("tracks", {}).get("items", [])
+            if (candidate := self._track(item)) is not None
         )
-        response.raise_for_status()
-        item = (response.json().get("tracks", {}).get("items") or [None])[0]
-        if not item:
-            return None
-        return ProviderTrack(
-            provider_track_id=f"spotify:{item['id']}",
-            title=item.get("name", ""),
-            artists=tuple(artist.get("name", "") for artist in item.get("artists", [])),
-            album=(item.get("album") or {}).get("name"),
-            duration_ms=item.get("duration_ms"),
-            isrc=(item.get("external_ids") or {}).get("isrc"),
-        )
+        return choose_best_candidate(track, candidates)
 
     def create_playlist(self, name: str, description: str | None = None) -> ProviderPlaylist:
-        profile = self.client.get("/me", headers=self._headers())
-        profile.raise_for_status()
-        response = self.client.post(
-            f"/users/{profile.json()['id']}/playlists",
-            headers={**self._headers(), "Content-Type": "application/json"},
+        profile = self._request("GET", "/me").json()
+        payload = self._request(
+            "POST",
+            f"/users/{profile['id']}/playlists",
+            headers={"Content-Type": "application/json"},
             json={"name": name, "description": description or "", "public": False},
-        )
-        response.raise_for_status()
-        payload = response.json()
+        ).json()
         return ProviderPlaylist(
             provider_playlist_id=f"spotify:{payload['id']}", name=payload["name"], tracks=()
         )
 
     def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
         raw_id = playlist_id.removeprefix("spotify:")
-        uris = [
-            f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}" for track in tracks
-        ]
-        if not uris:
-            return
-        response = self.client.post(
-            f"/playlists/{raw_id}/tracks",
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json={"uris": uris},
-        )
-        response.raise_for_status()
+        for offset in range(0, len(tracks), 100):
+            uris = [
+                f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"
+                for track in tracks[offset : offset + 100]
+            ]
+            if uris:
+                self._request(
+                    "POST",
+                    f"/playlists/{raw_id}/tracks",
+                    headers={"Content-Type": "application/json"},
+                    json={"uris": uris},
+                )
 
     def remove_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
         raw_id = playlist_id.removeprefix("spotify:")
-        uris = [
-            f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}" for track in tracks
-        ]
-        if not uris:
-            return
-        response = self.client.request(
-            "DELETE",
-            f"/playlists/{raw_id}/tracks",
-            headers={**self._headers(), "Content-Type": "application/json"},
-            json={"tracks": [{"uri": uri} for uri in uris]},
-        )
-        response.raise_for_status()
+        for offset in range(0, len(tracks), 100):
+            removal_items = []
+            for track in tracks[offset : offset + 100]:
+                item: dict[str, Any] = {
+                    "uri": f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"
+                }
+                if track.position is not None:
+                    item["positions"] = [track.position]
+                removal_items.append(item)
+            if removal_items:
+                self._request(
+                    "DELETE",
+                    f"/playlists/{raw_id}/tracks",
+                    headers={"Content-Type": "application/json"},
+                    json={"tracks": removal_items},
+                )

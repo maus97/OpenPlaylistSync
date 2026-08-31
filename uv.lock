@@ -783,7 +783,7 @@ requires-dist = [
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.9,<1" },
     { name = "sqlalchemy", specifier = ">=2.0,<3" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.34,<1" },
-    { name = "ytmusicapi", specifier = ">=1.11,<2" },
+    { name = "ytmusicapi", specifier = "==1.12.2" },
 ]
 provides-extras = ["dev"]
 

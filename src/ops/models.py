@@ -60,6 +60,7 @@ class SyncPair(Base):
     )
     source_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
     target_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    initial_sync_policy: Mapped[str] = mapped_column(String(32), default="merge", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -89,7 +90,25 @@ class SyncRun(Base):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     baseline_id: Mapped[int | None] = mapped_column(ForeignKey("sync_baselines.id"), nullable=True)
+    pair_id: Mapped[int | None] = mapped_column(ForeignKey("sync_pairs.id"), nullable=True)
+    plan_fingerprint: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class SyncAction(Base):
+    """Durable, redacted journal entry for one provider write."""
+
+    __tablename__ = "sync_actions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    run_id: Mapped[int] = mapped_column(ForeignKey("sync_runs.id"), nullable=False)
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    operation: Mapped[str] = mapped_column(String(32), nullable=False)
+    track_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default="planned")
+    error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)

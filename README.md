@@ -4,10 +4,10 @@ Open Playlist Sync is an open-source, privacy-first, self-hosted service for
 bidirectional playlist synchronization. The initial provider targets are
 Spotify and YouTube Music.
 
-This repository contains the implementation architecture and a runnable
-operator-assisted application milestone. Provider credentials and sync settings
-can be entered from the local web UI; writes remain guarded by plan review and
-explicit safety checks.
+This repository contains a runnable, operator-assisted application. Provider
+credentials and sync settings can be entered from the local web UI; playlist
+pairs can be selected in the browser, and every write remains guarded by plan
+review and explicit safety checks.
 
 ## Design commitments
 
@@ -26,7 +26,10 @@ explicit safety checks.
 
 Read the [implementation architecture](docs/architecture.md) for the module
 boundaries, data model direction, reconciliation model, deployment approach,
-and decisions that remain open.
+and decisions that remain open. The
+[technical completion guide](docs/technical-completion-guide.md) provides the
+ordered roadmap, release gates, and definition of done for taking the current
+milestone to dependable real-world synchronization.
 
 ## Local development
 
@@ -90,16 +93,24 @@ Implemented:
 - Provider adapters with guarded writes and operator-assisted authentication flows.
 - APScheduler lifecycle boundary and a server-rendered operator dashboard with
   playlist-pair configuration, plan review, and explicit approval flows.
+- First-sync choices for merge, source-led, target-led, or accept-as-is setup;
+  all initial convergence actions are additions only.
+- Occurrence-aware snapshots, provider paging, confidence-gated destination
+  searches, Spotify access-token refresh, and exact YouTube Music removals.
+- Durable plan/action journal, CSRF-protected browser forms, and pair
+  pause/delete/disconnect controls.
 - Offline demo workspace for testing baseline creation, simulated additions and
   removals, conflict review, and safe application without provider credentials.
 - Python packaging, pytest, Ruff, Docker, Compose, environment template, and
   GitHub Actions CI.
 
-Remaining for production hardening:
+Before using valuable real playlists:
 
-- Live provider end-to-end verification and rate-limit/retry tuning.
-- Track ordering, duplicate handling, and richer metadata reconciliation.
-- Credential key rotation and recovery workflow.
+- Complete the browser-based provider setup below and test with disposable
+  playlists first.
+- Review ambiguous songs rather than relying on an automatic match.
+- Keep remote deployments behind authenticated HTTPS access; OPS is designed
+  for local or trusted-network use by default.
 
 ## Production setup
 
@@ -110,8 +121,9 @@ data directory when deployment values are not supplied. The optional `.env`
 file is intended for deployment overrides, not normal operator setup.
 
 After saving settings, open `/pairs`, connect Spotify and YouTube Music, choose
-playlists, and establish the first non-destructive baseline. Review each later
-plan before applying it.
+playlists, select an initial-sync policy, and review the first non-destructive
+plan. OPS saves the baseline only after the reviewed initial state is complete.
+Review each later plan before applying it.
 
 ### Provider access setup
 
