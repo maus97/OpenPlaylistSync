@@ -7,19 +7,20 @@
   <div>
     <p class="eyebrow">SETTINGS</p>
     <h1>App settings.</h1>
-    <p class="lede">Add the app details for Spotify and Google here. Stored credentials are encrypted before they are saved.</p>
+    <p class="lede">Add provider app details, scheduling, and local access security.</p>
   </div>
   <div class="hero-orb orb-green" aria-hidden="true"></div>
 </section>
 
 {% if saved %}<div class="success-alert page-alert">Settings saved. You can now connect each service from the Playlists page.</div>{% endif %}
-<section class="card"><p class="muted-copy">Need the developer-platform steps or redirect addresses? <a class="text-link" href="/setup">Open the setup guide →</a></p></section>
+{% if password_changed == "1" %}<div class="success-alert page-alert">Password changed.</div>{% endif %}
 
 <form method="post" action="/settings">
   <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
   <section class="grid two-up">
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble green">●</span><div><h2>Spotify</h2><p>Client details for playlist access.</p></div></div>
+      <div class="card-heading"><span class="icon-bubble green">●</span><div><h2><a class="provider-title" href="/setup/spotify">Spotify <span aria-hidden="true">↗</span></a></h2><p>Spotify Developer Dashboard</p></div></div>
+      <p class="provider-brief">Create a Web API app, add the callback below, then paste its Client ID and secret.</p>
       <label>Client ID
         <input name="spotify_client_id" value="{{ spotify_client_id }}" autocomplete="off" placeholder="Paste Spotify client ID">
       </label>
@@ -34,7 +35,8 @@
     </article>
 
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2>YouTube Music</h2><p>Google OAuth client for playlist access.</p></div></div>
+      <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2><a class="provider-title" href="/setup/youtube_music">YouTube Music <span aria-hidden="true">↗</span></a></h2><p>Google Cloud Console</p></div></div>
+      <p class="provider-brief">Enable YouTube Data API v3, create a TVs and Limited Input devices OAuth client, then paste its ID and secret.</p>
       <label>Google OAuth client ID
         <input name="ytmusic_client_id" value="{{ ytmusic_client_id }}" autocomplete="off" placeholder="Paste Google OAuth client ID">
       </label>
@@ -65,4 +67,27 @@
 
   <div class="hero-actions"><button class="button primary" type="submit">Save settings</button><a class="button ghost" href="/pairs">Back to playlists</a></div>
 </form>
+
+<section class="card" id="first-sync">
+  <div class="section-heading"><div><p class="eyebrow">NEXT STEPS</p><h2>Connect and sync</h2></div></div>
+  <ol class="setup-list">
+    <li>Save the provider details above, then open <a class="text-link" href="/pairs">Playlists</a> and connect each service.</li>
+    <li>Choose an existing playlist or create a new empty playlist on either service, then create the pair.</li>
+    <li>Choose the first-sync option and review every proposed change. The first sync only adds tracks.</li>
+    <li>Later removals are shown clearly and require a typed confirmation before OPS applies them.</li>
+  </ol>
+</section>
+
+<section class="card security-card">
+  <div class="card-heading"><span class="icon-bubble green">⌁</span><div><h2>Local access password</h2><p>Required to open OPS on your network.</p></div></div>
+  {% if password_error %}<div class="error-alert">{{ password_error }}</div>{% endif %}
+  <form method="post" action="/settings/password">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Current password<input type="password" name="current_password" autocomplete="current-password" required></label>
+    <label>New password<input type="password" name="new_password" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+    <label>Confirm new password<input type="password" name="password_confirmation" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+    <p class="field-help">Use at least 12 characters. Incorrect attempts are rate-limited and temporarily locked out.</p>
+    <div class="hero-actions"><button class="button ghost" type="submit">Change password</button></div>
+  </form>
+</section>
 {% endblock %}

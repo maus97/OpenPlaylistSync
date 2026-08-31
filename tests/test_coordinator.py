@@ -20,12 +20,14 @@ class InMemoryProvider:
         self.provider = provider
         self.playlist_id = playlist_id
         self.tracks = list(tracks)
+        self.search_calls = 0
 
     def get_playlist(self, playlist_id: str) -> ProviderPlaylist:
         assert playlist_id == self.playlist_id
         return ProviderPlaylist(playlist_id, "Test playlist", tuple(self.tracks))
 
     def search_track(self, track: ProviderTrack) -> ProviderTrack:
+        self.search_calls += 1
         title = (
             f"{track.artists[0]} - {track.title} (Official Video)"
             if self.provider == "youtube_music"
@@ -78,7 +80,11 @@ def test_initial_merge_applies_additions_journals_actions_and_creates_baseline()
         assert plan.initial_sync
         assert len(plan.actions) == 1
 
+        assert coordinator.unresolved_actions(pair, plan) == ()
+        assert providers[target.id].search_calls == 1
+
         coordinator.apply(pair, plan)
+        assert providers[target.id].search_calls == 1
 
         baseline = SyncBaselineRepository(session).latest_for_pair(pair.id)
         assert baseline is not None
@@ -91,4 +97,46 @@ def test_initial_merge_applies_additions_journals_actions_and_creates_baseline()
         removal_plan = coordinator.preview(pair)
         assert len(removal_plan.actions) == 1
         assert removal_plan.actions[0].action.value == "remove_track"
+    engine.dispose()
+
+
+def test_review_looks_up_duplicate_tracks_once() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="test_source", external_account_id="source")
+        target = ProviderAccount(provider_name="test_target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="spotify:source-playlist",
+            target_playlist_id="youtube_music:target-playlist",
+            initial_sync_policy=InitialSyncPolicy.MERGE.value,
+        )
+        session.add(pair)
+        session.commit()
+
+        duplicate_track = ProviderTrack("spotify:track-1", "Song", ("Artist",))
+        providers = {
+            source.id: InMemoryProvider("spotify", "spotify:source-playlist", [duplicate_track]),
+            target.id: InMemoryProvider("youtube_music", "youtube_music:target-playlist", []),
+        }
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: providers[account.id],
+        )
+        plan = coordinator.preview(pair)
+        duplicate_action = plan.actions[0]
+        duplicate_plan = type(plan)(
+            actions=(duplicate_action, duplicate_action),
+            conflicts=(),
+            initial_sync=True,
+            initial_policy=InitialSyncPolicy.MERGE,
+        )
+
+        assert coordinator.unresolved_actions(pair, duplicate_plan) == ()
+        assert providers[target.id].search_calls == 1
     engine.dispose()

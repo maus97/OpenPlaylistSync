@@ -6,8 +6,8 @@ Open Playlist Sync (OPS) is an open-source, privacy-first, self-hosted
 bidirectional playlist synchronization service. The first provider adapters are
 Spotify and YouTube Music.
 
-The application is designed to run locally or in Docker on TrueNAS SCALE, but
-must not depend on TrueNAS-specific APIs or services.
+The application is designed to run locally or in Docker, and must not depend on
+host-specific APIs or services.
 
 ## Boundaries
 

@@ -156,3 +156,158 @@ def test_spotify_provider_follows_playlist_pages() -> None:
     )
 
     assert [playlist.name for playlist in provider.list_playlists()] == ["First", "Second"]
+
+
+def test_spotify_provider_matches_topic_channel_metadata_from_youtube() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/search"
+        assert request.url.params["q"] == "Back In Black AC/DC"
+        assert request.url.params["limit"] == "10"
+        assert "market" not in request.url.params
+        return httpx.Response(
+            200,
+            json={
+                "tracks": {
+                    "items": [
+                        {
+                            "id": "back-in-black",
+                            "name": "Back In Black",
+                            "artists": [{"name": "AC/DC"}],
+                            "duration_ms": 255_000,
+                        }
+                    ]
+                }
+            },
+        )
+
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    resolved = provider.search_track(
+        ProviderTrack("youtube_music:back-in-black", "Back In Black", ("AC/DC - Topic",))
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "spotify:back-in-black"
+
+
+def test_spotify_provider_strips_official_video_metadata_from_youtube() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/v1/search"
+        assert request.url.params["q"] == "Try P!nk"
+        return httpx.Response(
+            200,
+            json={
+                "tracks": {"items": [{"id": "try", "name": "Try", "artists": [{"name": "P!nk"}]}]}
+            },
+        )
+
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    resolved = provider.search_track(
+        ProviderTrack("youtube_music:try", "P!nk - Try (Official Video)", ("PinkVEVO",))
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "spotify:try"
+
+
+def test_spotify_provider_matches_youtube_cover_using_the_cover_artist() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.params["q"] == "Drops of Jupiter First to Eleven"
+        return httpx.Response(
+            200,
+            json={
+                "tracks": {
+                    "items": [
+                        {
+                            "id": "cover",
+                            "name": "Drops of Jupiter",
+                            "artists": [{"name": "First To Eleven"}],
+                        }
+                    ]
+                }
+            },
+        )
+
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    resolved = provider.search_track(
+        ProviderTrack(
+            "youtube_music:cover",
+            '"Drops of Jupiter" - Train (Cover by First to Eleven)',
+            ("First To Eleven",),
+        )
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "spotify:cover"
+
+
+def test_spotify_provider_keeps_requested_acoustic_versions() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            json={
+                "tracks": {
+                    "items": [
+                        {
+                            "id": "standard",
+                            "name": "Bad Habits",
+                            "artists": [{"name": "Ed Sheeran"}],
+                        },
+                        {
+                            "id": "acoustic",
+                            "name": "Bad Habits (Acoustic Version)",
+                            "artists": [{"name": "Ed Sheeran"}],
+                        },
+                    ]
+                }
+            },
+        )
+
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    resolved = provider.search_track(
+        ProviderTrack(
+            "youtube_music:acoustic",
+            "Ed Sheeran - Bad Habits (Acoustic Version)",
+            ("Ed Sheeran - Topic",),
+        )
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "spotify:acoustic"
+
+
+def test_spotify_provider_does_not_search_for_unavailable_youtube_videos() -> None:
+    provider = SpotifyProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1",
+            transport=httpx.MockTransport(lambda _: pytest.fail("search should not be called")),
+        ),
+    )
+
+    assert (
+        provider.search_track(ProviderTrack("youtube_music:private", "Private video", ())) is None
+    )

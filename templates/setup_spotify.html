@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+
+{% block title %}Spotify setup{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero">
+  <div>
+    <p class="eyebrow">SPOTIFY GUIDE</p>
+    <h1>Connect Spotify.</h1>
+    <p class="lede">Create a small Spotify Web API app, copy its credentials into OPS, and approve access to your playlists.</p>
+  </div>
+  <div class="hero-orb orb-green" aria-hidden="true"></div>
+</section>
+
+<section class="card guide-page">
+  <div class="guide-step">
+    <div class="guide-number">1</div>
+    <h2>Create the Spotify app</h2>
+    <ol class="setup-list">
+      <li>Open the <a class="text-link" href="https://developer.spotify.com/dashboard" target="_blank" rel="noreferrer">Spotify Developer Dashboard ↗</a> and sign in.</li>
+      <li>Select <strong>Create app</strong>. Enter any app name and description, select <strong>Web API</strong> if asked, accept the Developer Terms, and create it.</li>
+    </ol>
+  </div>
+
+  <div class="guide-step">
+    <div class="guide-number">2</div>
+    <h2>Allow OPS to return from sign-in</h2>
+    <ol class="setup-list">
+      <li>Open the new app, choose <strong>Settings</strong> or <strong>Edit settings</strong>, and find <strong>Redirect URIs</strong>.</li>
+      <li>Add the address below exactly, then save. Do not replace <code>127.0.0.1</code> with <code>localhost</code>.</li>
+    </ol>
+    <p class="code-callout"><code>{{ redirect_uri|default('http://127.0.0.1:8000/auth/spotify/callback') }}</code></p>
+    <p class="field-help">When OPS is behind an HTTPS reverse proxy, use that public HTTPS callback address instead and enter the same value in Settings.</p>
+  </div>
+
+  <div class="guide-step">
+    <div class="guide-number">3</div>
+    <h2>Copy the two app values</h2>
+    <ol class="setup-list">
+      <li>In the Spotify app overview, copy the <strong>Client ID</strong>.</li>
+      <li>Open <strong>Settings</strong>, choose <strong>View client secret</strong>, and copy the <strong>Client Secret</strong>.</li>
+      <li>Paste both into the Spotify fields on <a class="text-link" href="/settings">Settings</a>, then save.</li>
+    </ol>
+    <p class="field-help">Treat the client secret like a password. Keep it in OPS or a password manager; never post it in chat or commit it to Git.</p>
+  </div>
+
+  <div class="guide-step">
+    <div class="guide-number">4</div>
+    <h2>Approve your Spotify account</h2>
+    <ol class="setup-list">
+      <li>Open <a class="text-link" href="/pairs">Playlists</a> and choose <strong>Connect Spotify</strong>.</li>
+      <li>Review the requested permissions and approve them. OPS needs playlist read/write access and basic account access for catalogue searches.</li>
+    </ol>
+    <p class="field-help">Spotify Web API access requires a Premium account. OPS never receives your Spotify password.</p>
+  </div>
+</section>
+
+<div class="hero-actions"><a class="button primary" href="/settings">Back to Settings</a><a class="button ghost" href="/setup/youtube_music">YouTube Music guide</a></div>
+{% endblock %}

@@ -53,6 +53,8 @@ class YouTubeMusicProvider:
                 "YouTube Music authorization expired; reconnect the account"
             )
         reason = self._error_reason(response)
+        if response.status_code == 429:
+            raise RateLimited()
         if response.status_code == 403 and reason in {
             "quotaExceeded",
             "rateLimitExceeded",
@@ -140,6 +142,75 @@ class YouTubeMusicProvider:
         return tuple(aliases.get(token, token) for token in cls._search_tokens(value))
 
     @classmethod
+    def _requested_title_tokens(cls, value: str) -> tuple[str, ...]:
+        """Remove provider display metadata that is not part of a song title.
+
+        Spotify often appends labels such as ``From "Frozen"/Soundtrack
+        Version`` to the title.  Those labels are useful to a person but do
+        not normally appear in the official YouTube upload, so retaining them
+        makes an otherwise exact result look unrelated.
+        """
+
+        clean_title = re.sub(
+            r"\s*[-–—]\s*(?:from\b.*|.*\b(?:soundtrack|version|remaster(?:ed)?)\b.*)$",
+            "",
+            value,
+            flags=re.IGNORECASE,
+        )
+        return cls._canonical_search_tokens(clean_title)
+
+    @classmethod
+    def _artist_in_candidate(cls, artist: str, candidate: ProviderTrack) -> bool:
+        """Recognize normal channel spelling variants such as ``ArtistVEVO``."""
+
+        artist_tokens = cls._search_tokens(artist)
+        if not artist_tokens:
+            return False
+        artist_set = set(artist_tokens)
+        candidate_artist_tokens = {
+            token
+            for candidate_artist in candidate.artists
+            for token in cls._search_tokens(candidate_artist)
+        }
+        if artist_set <= candidate_artist_tokens:
+            return True
+        candidate_title_tokens = set(cls._search_tokens(candidate.title))
+        if artist_set <= candidate_title_tokens:
+            return True
+        compact_artist = "".join(artist_tokens)
+        compact_channels = "".join(
+            token
+            for candidate_artist in candidate.artists
+            for token in cls._search_tokens(candidate_artist)
+        )
+        return len(compact_artist) >= 4 and compact_artist in compact_channels
+
+    @classmethod
+    def _trusted_upload(cls, candidate: ProviderTrack) -> bool:
+        """Identify official YouTube distribution channels without trusting uploads blindly."""
+
+        channel_tokens = {
+            token for artist in candidate.artists for token in cls._search_tokens(artist)
+        }
+        compact_channel = "".join(channel_tokens)
+        return "topic" in channel_tokens or compact_channel.endswith("vevo")
+
+    @classmethod
+    def _variant_penalty(cls, requested: ProviderTrack, candidate: ProviderTrack) -> float:
+        """Prefer the standard recording unless the source requests a variant."""
+
+        requested_tokens = set(cls._canonical_search_tokens(requested.title))
+        candidate_tokens = set(cls._canonical_search_tokens(candidate.title))
+        penalty = 0.0
+        for label, amount in (("acoustic", 20.0), ("unplugged", 20.0), ("live", 12.0)):
+            if label in candidate_tokens and label not in requested_tokens:
+                penalty += amount
+        for labels, amount in ((("sign", "language"), 24.0), (("sing", "along"), 10.0)):
+            if set(labels) <= candidate_tokens and not set(labels) <= requested_tokens:
+                penalty += amount
+        return penalty
+
+    @classmethod
     def _search_score(cls, requested: ProviderTrack, candidate: ProviderTrack) -> float:
         """Score YouTube's descriptive video titles conservatively.
 
@@ -150,7 +221,7 @@ class YouTubeMusicProvider:
         channel metadata before a result can be accepted.
         """
 
-        requested_title = cls._canonical_search_tokens(requested.title)
+        requested_title = cls._requested_title_tokens(requested.title)
         candidate_title = cls._canonical_search_tokens(candidate.title)
         if not requested_title or not candidate_title:
             return 0.0
@@ -174,20 +245,8 @@ class YouTubeMusicProvider:
 
         artist_match = False
         for artist in requested.artists:
-            artist_tokens = cls._search_tokens(artist)
-            if not artist_tokens:
-                continue
-            artist_set = set(artist_tokens)
-            candidate_artist_tokens = set(
-                token
-                for candidate_artist in candidate.artists
-                for token in cls._search_tokens(candidate_artist)
-            )
-            if artist_set <= candidate_artist_tokens:
+            if cls._artist_in_candidate(artist, candidate):
                 score += 30.0 / max(len(requested.artists), 1)
-                artist_match = True
-            elif artist_set <= candidate_title_set:
-                score += 25.0 / max(len(requested.artists), 1)
                 artist_match = True
 
         if not artist_match and requested.artists:
@@ -212,31 +271,61 @@ class YouTubeMusicProvider:
             score -= 25.0
         if "remix" in qualifiers:
             score -= 12.0
-        return score
+        if cls._trusted_upload(candidate):
+            score += 12.0
+        return score - cls._variant_penalty(requested, candidate)
 
     @classmethod
     def _choose_search_candidate(
         cls, requested: ProviderTrack, candidates: Sequence[ProviderTrack]
     ) -> ProviderTrack | None:
+        def sort_key(item: tuple[float, ProviderTrack]) -> tuple[float, int, int, str]:
+            score, candidate = item
+            duration_difference = (
+                abs(requested.duration_ms - candidate.duration_ms)
+                if requested.duration_ms is not None and candidate.duration_ms is not None
+                else 1_000_000_000
+            )
+            # A stable, evidence-based tie-break avoids rejecting an obvious
+            # recording merely because YouTube lists both an official video
+            # and an official lyric upload.  It never promotes a candidate
+            # below the confidence threshold.
+            return (
+                score,
+                int(cls._trusted_upload(candidate)),
+                -duration_difference,
+                candidate.provider_track_id,
+            )
+
         scored = sorted(
             ((cls._search_score(requested, candidate), candidate) for candidate in candidates),
-            key=lambda item: item[0],
+            key=sort_key,
             reverse=True,
         )
         if not scored or scored[0][0] < 70.0:
             return None
         if len(scored) > 1 and scored[0][0] - scored[1][0] < 5.0:
-            top_title = cls._canonical_search_tokens(scored[0][1].title)
-            tied_titles = {
-                cls._canonical_search_tokens(candidate.title)
-                for score, candidate in scored
-                if scored[0][0] - score < 5.0
-            }
-            # YouTube commonly returns the same official upload more than
-            # once through different channels. Equal strong matches with the
-            # same normalized title are safe to collapse to the first result;
-            # genuinely different titles remain ambiguous and are rejected.
-            if len(tied_titles) != 1 or top_title not in tied_titles:
+            near_ties = [candidate for score, candidate in scored if scored[0][0] - score < 5.0]
+            requested_title = cls._requested_title_tokens(requested.title)
+            # Near ties are safe only when every candidate demonstrably
+            # contains the requested song title.  This preserves the original
+            # refusal to guess between genuinely different songs.
+            if not all(
+                any(
+                    tuple(
+                        cls._canonical_search_tokens(candidate.title)[
+                            offset : offset + len(requested_title)
+                        ]
+                    )
+                    == requested_title
+                    for offset in range(
+                        len(cls._canonical_search_tokens(candidate.title))
+                        - len(requested_title)
+                        + 1
+                    )
+                )
+                for candidate in near_ties
+            ):
                 return None
         return scored[0][1]
 

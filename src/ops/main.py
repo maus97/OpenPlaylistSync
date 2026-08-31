@@ -16,6 +16,7 @@ from ops.configuration import load_app_settings
 from ops.db import SessionLocal
 from ops.providers.factory import create_provider
 from ops.scheduler import SchedulerService
+from ops.security.middleware import LocalAuthenticationMiddleware
 from ops.storage.repositories import SyncPairRepository
 from ops.sync.coordinator import SyncCoordinator
 
@@ -57,16 +58,18 @@ def create_app() -> FastAPI:
         ),
         name="static",
     )
-    if settings.session_secret:
-        app.add_middleware(
-            SessionMiddleware,
-            secret_key=settings.session_secret,
-            https_only=(
-                settings.session_cookie_secure
-                if settings.session_cookie_secure is not None
-                else settings.environment == "production"
-            ),
-        )
+    app.add_middleware(LocalAuthenticationMiddleware)
+    app.add_middleware(
+        SessionMiddleware,
+        secret_key=settings.session_secret or "",
+        https_only=(
+            settings.session_cookie_secure
+            if settings.session_cookie_secure is not None
+            else settings.environment == "production"
+        ),
+        same_site="lax",
+        max_age=8 * 60 * 60,
+    )
     app.include_router(router)
     return app
 

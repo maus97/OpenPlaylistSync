@@ -22,9 +22,11 @@ from ops.storage.repositories import (
     SyncRunRepository,
 )
 from ops.sync.domain import (
+    ActionType,
     BaselineState,
     InitialSyncPolicy,
     PlaylistState,
+    ReconciliationAction,
     ReconciliationPlan,
     reconcile,
 )
@@ -260,6 +262,106 @@ class SyncCoordinator:
         self.session.commit()
         return plan
 
+    def unresolved_actions(
+        self, pair: SyncPair, plan: ReconciliationPlan
+    ) -> tuple[ReconciliationAction, ...]:
+        """Find additions that the destination provider cannot currently match.
+
+        Confirmed results are retained as exact destination track mappings.  A
+        later apply can therefore use the reviewed result rather than spend a
+        second YouTube search request for the same track.
+        """
+
+        source_provider, target_provider, source_account, target_account = self._providers(pair)
+        cached = self._cached_resolutions(pair, plan)
+        unresolved = []
+        resolved_in_review: dict[tuple[int, str], ProviderTrack] = {}
+        unresolved_in_review: set[tuple[int, str]] = set()
+        cache_updated = False
+        for index, action in enumerate(plan.actions):
+            if action.action is not ActionType.ADD_TRACK:
+                continue
+            if index in cached:
+                continue
+            provider = source_provider if action.side.value == "source" else target_provider
+            account = source_account if action.side.value == "source" else target_account
+            lookup_key = (account.id, action.track.key)
+            if lookup_key in unresolved_in_review:
+                unresolved.append(action)
+                continue
+            if lookup_key in resolved_in_review:
+                continue
+            track = ProviderTrack(
+                provider_track_id=action.track.source_provider_track_id,
+                title=action.track.title,
+                artists=action.track.artists,
+                duration_ms=action.track.duration_ms,
+                isrc=action.track.isrc,
+                occurrence_id=action.track.occurrence_id,
+                position=action.track.position,
+            )
+            resolved = provider.search_track(track)
+            if resolved is None:
+                unresolved_in_review.add(lookup_key)
+                unresolved.append(action)
+                continue
+            resolved_in_review[lookup_key] = resolved
+            self._save_track_mapping(account.id, resolved, action.track.key)
+            cache_updated = True
+        if cache_updated:
+            self.session.commit()
+        return tuple(unresolved)
+
+    def _cached_resolutions(
+        self, pair: SyncPair, plan: ReconciliationPlan
+    ) -> dict[int, ProviderTrack]:
+        """Return reviewed destination IDs for additions in this exact plan."""
+
+        additions = [
+            (index, action)
+            for index, action in enumerate(plan.actions)
+            if action.action is ActionType.ADD_TRACK
+        ]
+        if not additions:
+            return {}
+        account_for_side = {
+            "source": pair.source_account_id,
+            "target": pair.target_account_id,
+        }
+        account_ids = set(account_for_side.values())
+        keys = {action.track.key for _, action in additions}
+        mappings = list(
+            self.session.scalars(
+                select(ProviderTrackMapping)
+                .where(
+                    ProviderTrackMapping.account_id.in_(account_ids),
+                    ProviderTrackMapping.canonical_key.in_(keys),
+                )
+                .order_by(ProviderTrackMapping.updated_at.desc())
+            )
+        )
+        mapping_by_account_and_key: dict[tuple[int, str], ProviderTrackMapping] = {}
+        for mapping in mappings:
+            mapping_by_account_and_key.setdefault(
+                (mapping.account_id, mapping.canonical_key), mapping
+            )
+        return {
+            index: ProviderTrack(
+                provider_track_id=mapping.provider_track_id,
+                title=action.track.title,
+                artists=action.track.artists,
+                duration_ms=action.track.duration_ms,
+                isrc=action.track.isrc,
+            )
+            for index, action in additions
+            if (
+                mapping := mapping_by_account_and_key.get(
+                    (account_for_side[action.side.value], action.track.key)
+                )
+            )
+            is not None
+        }
+
     def accept_current_state(self, pair: SyncPair) -> None:
         """Explicitly create a baseline without attempting convergence."""
 
@@ -274,6 +376,8 @@ class SyncCoordinator:
         pair: SyncPair,
         plan: ReconciliationPlan,
         approval: Approval | None = None,
+        *,
+        skip_unresolved: bool = False,
     ) -> None:
         current_source, current_target, source_provider, target_provider = self._current_state(pair)
         baseline_record = SyncBaselineRepository(self.session).latest_for_pair(pair.id)
@@ -304,13 +408,16 @@ class SyncCoordinator:
         self.session.commit()
 
         try:
-            SyncExecutor().apply(
+            pre_resolved_tracks = self._cached_resolutions(pair, plan)
+            result = SyncExecutor().apply(
                 plan,
                 source_provider=source_provider,
                 target_provider=target_provider,
                 source_playlist_id=pair.source_playlist_id,
                 target_playlist_id=pair.target_playlist_id,
                 approval=approval,
+                skip_unresolved=skip_unresolved,
+                pre_resolved_tracks=pre_resolved_tracks,
                 on_action_completed=lambda index: action_repo.complete(journal[index]),
                 on_track_resolved=lambda action, track: self._save_track_mapping(
                     pair.source_account_id
@@ -320,9 +427,22 @@ class SyncCoordinator:
                     action.track.key,
                 ),
             )
+            for index in result.skipped_indices:
+                action = journal[index]
+                action.status = "skipped"
+                action.error_summary = "track could not be resolved on the destination provider"
             resulting_source, resulting_target, _, _ = self._current_state(pair)
             self._save_baseline(pair, resulting_source, resulting_target)
-            run_repo.finish(run, "applied", json.dumps({"actions": len(plan.actions)}))
+            run_repo.finish(
+                run,
+                "applied",
+                json.dumps(
+                    {
+                        "actions_applied": len(plan.actions) - len(result.skipped_indices),
+                        "actions_skipped": len(result.skipped_indices),
+                    }
+                ),
+            )
             self.session.commit()
         except Exception as exc:
             for action in journal:

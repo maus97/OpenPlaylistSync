@@ -68,10 +68,9 @@ workflow without a command line:
 | P1 | Retry and rate-limit handling | No common retry policy | Bounded exponential backoff honors provider retry guidance and never retries unsafe writes blindly |
 | P1 | Scheduler policy | Scheduler creates previews only | Per-pair scheduling can auto-apply explicitly permitted additions; destructive plans remain queued for approval |
 | P1 | GUI completeness | Basic setup, pairing, previews, and history exist | Account health, reconnect/disconnect, pair edit/disable/delete, match review, actionable errors, and recovery are available in the GUI |
-| P1 | Network security | The service has no operator authentication or CSRF protection and Compose publishes to the host network | Local-only defaults are documented; remote/TrueNAS access uses authenticated HTTPS, secure cookies, and CSRF protection |
+| P1 | Network security | The service has no operator authentication or CSRF protection and Compose publishes to the host network | Local-only defaults are documented; remote access uses authenticated HTTPS, secure cookies, and CSRF protection |
 | P1 | Backup and restore | Persistent Docker storage exists but has no tested recovery procedure | Database and generated secret files are backed up together and a clean-host restore drill passes |
 | P2 | Production operations | Basic health check and logs exist | Structured redacted logs, readiness checks, migration/upgrade procedures, retention, and release rollback are documented and tested |
-| P2 | TrueNAS release validation | Deployment is portable in design | Dataset permissions, upgrades, health checks, backup, and restore pass on a supported TrueNAS SCALE release |
 
 ## Phase 0: preserve the safety boundary
 
@@ -297,7 +296,7 @@ writes for one pair, and no schedule can bypass a destructive-action guard.
 ## Phase 7: define and implement the deployment security model
 
 The current service is appropriate only on the local computer or a trusted
-private network. Before exposing it through TrueNAS or a reverse proxy:
+private network. Before exposing it through a reverse proxy:
 
 1. Add operator authentication, or require and document an authenticated
    reverse proxy as a hard deployment prerequisite.
@@ -316,13 +315,13 @@ private network. Before exposing it through TrueNAS or a reverse proxy:
 Exit criterion: the selected local-only or authenticated-remote security model
 is explicit, tested, and visible in deployment documentation.
 
-## Phase 8: backup, restore, Docker, and TrueNAS
+## Phase 8: backup, restore, and Docker
 
 The persistent unit is the complete `/data` directory, including SQLite,
 `.ops-credential-key`, and `.ops-session-secret`. Backing up only the database
 can leave encrypted credentials unrecoverable.
 
-1. Use a TrueNAS dataset or Docker volume with ownership compatible with the
+1. Use a Docker volume or host directory with ownership compatible with the
    image's non-root user.
 2. Create a consistent backup by stopping writes or using SQLite's supported
    backup mechanism; capture the database and generated secret files together.
@@ -333,8 +332,8 @@ can leave encrypted credentials unrecoverable.
 5. Keep one application replica while using SQLite and in-process scheduling.
 6. Enable SQLite WAL mode and a suitable busy timeout only after concurrency
    tests confirm the chosen settings.
-7. Validate the Compose configuration as a TrueNAS custom app without adding
-   TrueNAS-only imports or runtime dependencies.
+7. Validate the Compose configuration on a clean host without adding
+   platform-only imports or runtime dependencies.
 
 Exit criterion: a backup from one installation restores successfully on a clean
 host and the next synchronization begins from the correct baseline.
@@ -389,7 +388,7 @@ operator-facing behavior, and documentation where applicable.
 9. Add GUI account recovery, pair management, and match review.
 10. Add conservative scheduled application and per-pair locking.
 11. Add authentication, CSRF, secure reverse-proxy deployment, and log redaction.
-12. Publish and prove backup/restore, upgrade/rollback, and TrueNAS procedures.
+12. Publish and prove backup/restore, upgrade/rollback, and deployment procedures.
 
 ## Architecture decisions to record
 
@@ -434,7 +433,7 @@ OPS can be described as fully working only when all of the following are true:
   release coverage gates.
 - [ ] Remote access is authenticated and protected by HTTPS and CSRF controls,
   or the service is explicitly restricted to local access.
-- [ ] Backup, clean-host restore, migration, rollback, and TrueNAS deployment
+- [ ] Backup, clean-host restore, migration, rollback, and deployment procedures
   have all been demonstrated.
 - [ ] Release notes document known provider limitations and YouTube Data API
   quota/visibility constraints.
@@ -452,4 +451,3 @@ OPS can be described as fully working only when all of the following are true:
 - [Google YouTube authorization credentials](https://developers.google.com/youtube/registering_an_application)
 - [YouTube Data API v3 reference](https://developers.google.com/youtube/v3/docs)
 - [Docker volume backup and restore](https://docs.docker.com/engine/storage/volumes/)
-- [TrueNAS SCALE custom app deployment](https://www.truenas.com/docs/scale/26/apps/installcustomappscreens/)

@@ -41,3 +41,40 @@ def test_executor_preflights_and_applies_non_destructive_addition() -> None:
     )
 
     assert provider.added == ["resolved-track"]
+
+
+def test_executor_can_skip_an_unresolved_track_after_review() -> None:
+    class UnresolvedProvider(FakeProvider):
+        def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
+            return None if track.title == "Unavailable" else super().search_track(track)
+
+    provider = UnresolvedProvider()
+    plan = ReconciliationPlan(
+        actions=(
+            ReconciliationAction(
+                Side.TARGET,
+                ActionType.ADD_TRACK,
+                TrackState("text:unavailable|artist", "Unavailable", ("Artist",), "source-one"),
+                "test",
+            ),
+            ReconciliationAction(
+                Side.TARGET,
+                ActionType.ADD_TRACK,
+                TrackState("text:available|artist", "Available", ("Artist",), "source-two"),
+                "test",
+            ),
+        ),
+        conflicts=(),
+    )
+
+    result = SyncExecutor().apply(
+        plan,
+        source_provider=provider,
+        target_provider=provider,
+        source_playlist_id="source",
+        target_playlist_id="target",
+        skip_unresolved=True,
+    )
+
+    assert result.skipped_indices == (0,)
+    assert provider.added == ["resolved-track"]

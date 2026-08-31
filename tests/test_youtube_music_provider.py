@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from ops.providers.base import AuthorizationRequired
+from ops.providers.base import AuthorizationRequired, RateLimited
 from ops.providers.types import ProviderTrack
 from ops.providers.youtube_music import YouTubeMusicProvider
 
@@ -113,6 +113,24 @@ def test_youtube_provider_requires_a_linked_account() -> None:
         YouTubeMusicProvider().list_playlists()
 
 
+def test_youtube_provider_reports_http_429_as_rate_limited() -> None:
+    provider = YouTubeMusicProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://www.googleapis.com/youtube/v3",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    429,
+                    json={"error": {"errors": [{"reason": "rateLimitExceeded"}]}},
+                )
+            ),
+        ),
+    )
+
+    with pytest.raises(RateLimited):
+        provider.search_track(ProviderTrack("spotify:track", "Song", ("Artist",)))
+
+
 def test_youtube_search_accepts_official_video_title_without_false_lyrics_match() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/youtube/v3/search":
@@ -164,3 +182,57 @@ def test_youtube_search_accepts_official_video_title_without_false_lyrics_match(
 
     assert resolved is not None
     assert resolved.provider_track_id == "youtube_music:official"
+
+
+def test_youtube_search_normalizes_spotify_soundtrack_labels() -> None:
+    requested = ProviderTrack(
+        "spotify:open-door",
+        'Love Is an Open Door - From "Frozen"/Soundtrack Version',
+        ("Kristen Bell", "Santino Fontana"),
+        duration_ms=124_733,
+    )
+    resolved = YouTubeMusicProvider._choose_search_candidate(
+        requested,
+        (
+            ProviderTrack(
+                "youtube_music:official",
+                'Kristen Bell, Santino Fontana - Love Is an Open Door (From "Frozen"/Sing-Along)',
+                ("DisneyMusicVEVO",),
+                duration_ms=126_000,
+            ),
+        ),
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "youtube_music:official"
+    assert YouTubeMusicProvider._requested_title_tokens("From the Start") == (
+        "from",
+        "the",
+        "start",
+    )
+
+
+def test_youtube_search_prefers_standard_topic_upload_over_acoustic_variant() -> None:
+    requested = ProviderTrack(
+        "spotify:a-little-more", "A Little More", ("Ed Sheeran",), duration_ms=192_043
+    )
+    resolved = YouTubeMusicProvider._choose_search_candidate(
+        requested,
+        (
+            ProviderTrack(
+                "youtube_music:acoustic",
+                "Ed Sheeran - A Little More (Official Acoustic Video)",
+                ("Ed Sheeran",),
+                duration_ms=201_000,
+            ),
+            ProviderTrack(
+                "youtube_music:topic",
+                "A Little More",
+                ("Ed Sheeran - Topic",),
+                duration_ms=193_000,
+            ),
+        ),
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "youtube_music:topic"

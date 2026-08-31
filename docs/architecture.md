@@ -24,7 +24,7 @@ of done for the work beyond this milestone.
    run.
 3. Make the first synchronization non-destructive and make all later deletes
    explicit, reviewable, and guarded.
-4. Run on a normal Python host, Docker, or TrueNAS SCALE without TrueNAS APIs.
+4. Run on a normal Python host or Docker without host-specific dependencies.
 5. Keep credentials local, encrypted at rest, and absent from logs and source.
 6. Make provider behavior replaceable with fakes in tests.
 
@@ -209,8 +209,7 @@ to reconstruct the previous successful baseline.
 
 Docker is the primary packaging target. The container runs as a non-root user,
 stores SQLite data on `/data`, and exposes only the FastAPI HTTP port. Compose
-provides a portable local and TrueNAS SCALE deployment shape using a named
-volume. No TrueNAS-specific code is required or imported.
+provides a portable local deployment shape using a named volume.
 
 ## Testing strategy
 
@@ -242,5 +241,3 @@ volume. No TrueNAS-specific code is required or imported.
 7. **Scheduler behavior:** the lifecycle and single-instance preview tick are
    implemented; define durable job state, retries, backoff, and recovery after
    process restarts.
-8. **TrueNAS packaging:** validate permissions, volume ownership, updates, and
-   health-check behavior on a real SCALE host without adding platform coupling.

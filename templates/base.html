@@ -8,19 +8,35 @@
     <link rel="stylesheet" href="/static/style.css">
   </head>
   <body>
+    <div class="page-loading" id="page-loading" hidden role="status" aria-live="polite">
+      <div class="loading-card"><span class="loading-spinner" aria-hidden="true"></span><div><strong id="page-loading-message">Preparing review…</strong><p>OPS is checking each track on the other service. Large playlists can take a few minutes.</p></div></div>
+    </div>
     <div class="app-shell">
       <header class="topbar">
         <a class="brand" href="/"><span class="brand-mark">↯</span><span>open<span class="brand-green">playlist</span><span class="brand-pink">sync</span></span></a>
-        <nav class="nav-links" aria-label="Primary navigation">
+        {% if request.session.get("local_admin_authenticated") %}<nav class="nav-links" aria-label="Primary navigation">
           <a href="/pairs">Playlists</a>
           <a href="/runs">Activity</a>
-          <a href="/setup">Setup</a>
           <a href="/settings">Settings</a>
+          <a href="/about">About</a>
           <a class="nav-cta" href="/pairs">Create pair</a>
-        </nav>
+          <form method="post" action="/auth/logout" class="inline-form"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="nav-logout" type="submit">Lock</button></form>
+        </nav>{% endif %}
       </header>
       <main class="page-shell">{% block content %}{% endblock %}</main>
-      <footer class="footer"><span>OPS · private and local</span><a href="/healthz">System health</a></footer>
+      <footer class="footer"><span>OPS · private and local</span><span><a href="/about">About</a> · <a href="/healthz">System health</a></span></footer>
     </div>
+    <script>
+      document.addEventListener("click", (event) => {
+        const link = event.target.closest("a[data-loading-message]");
+        if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+        const overlay = document.getElementById("page-loading");
+        const message = document.getElementById("page-loading-message");
+        if (!overlay || !message) return;
+        message.textContent = link.dataset.loadingMessage;
+        overlay.hidden = false;
+        document.body.setAttribute("aria-busy", "true");
+      });
+    </script>
   </body>
 </html>

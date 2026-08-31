@@ -1,0 +1,15 @@
+{% extends "base.html" %}
+{% block title %}Secure OPS{% endblock %}
+{% block content %}
+<section class="hero compact-hero"><div><p class="eyebrow">FIRST-RUN SECURITY</p><h1>Secure your OPS.</h1><p class="lede">Create the local password required to open this app on your network.</p></div><div class="hero-orb orb-green" aria-hidden="true"></div></section>
+<section class="card auth-card">
+  {% if error %}<div class="error-alert">{{ error }}</div>{% endif %}
+  <form method="post" action="/auth/setup">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Create password<input type="password" name="password" autocomplete="new-password" minlength="12" maxlength="256" required autofocus></label>
+    <label>Confirm password<input type="password" name="password_confirmation" autocomplete="new-password" minlength="12" maxlength="256" required></label>
+    <p class="field-help">Use a password or passphrase of at least 12 characters. OPS stores a memory-hard password verifier, never the password itself.</p>
+    <div class="hero-actions"><button class="button primary" type="submit">Secure OPS</button></div>
+  </form>
+</section>
+{% endblock %}

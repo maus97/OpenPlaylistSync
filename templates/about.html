@@ -1,0 +1,32 @@
+{% extends "base.html" %}
+
+{% block title %}About{% endblock %}
+
+{% block content %}
+<section class="hero compact-hero">
+  <div>
+    <p class="eyebrow">ABOUT OPS</p>
+    <h1>Playlists, kept in sync.</h1>
+    <p class="lede">Open Playlist Sync is a private, self-hosted bridge between Spotify and YouTube Music.</p>
+  </div>
+  <div class="hero-orb orb-green" aria-hidden="true"></div>
+</section>
+
+<section class="grid two-up">
+  <article class="card accent-card">
+    <div class="card-heading"><span class="icon-bubble green">↔</span><div><h2>What it is</h2><p>One local service for two music libraries.</p></div></div>
+    <p class="muted-copy">OPS compares paired playlists, shows the proposed changes, and lets you apply only the changes you approve. It supports two-way reconciliation while keeping the final decision with you.</p>
+  </article>
+  <article class="card">
+    <div class="card-heading"><span class="icon-bubble red">⌁</span><div><h2>Why it was designed</h2><p>Privacy and control come first.</p></div></div>
+    <p class="muted-copy">OPS was designed for people who use more than one music service but do not want their playlists, credentials, or listening data sent to another hosted sync service. It runs on your own machine or private server, has no telemetry, encrypts provider credentials at rest, and keeps destructive changes behind review.</p>
+  </article>
+</section>
+
+<section class="card">
+  <div class="card-heading"><span class="icon-bubble green">©</span><div><h2>License</h2><p>Open source under GNU AGPLv3-or-later.</p></div></div>
+  <p class="muted-copy">You may use, modify, and redistribute OPS under the terms of the <a class="text-link" href="https://www.gnu.org/licenses/agpl-3.0.html" target="_blank" rel="noreferrer">GNU Affero General Public License v3 or later ↗</a>. Modified network versions must provide their corresponding source to users. AGPL permits charging for copies, hosting, or support; a no-commercial-use restriction would not be an open-source license.</p>
+  <p class="field-help">Copyright © 2026 Open Playlist Sync contributors. Provided without warranty. <a class="text-link" href="https://github.com/maus97/OpenPlaylistSync" target="_blank" rel="noreferrer">View the source code ↗</a>. The complete license text is included in the repository.</p>
+  <div class="hero-actions"><a class="button primary" href="/settings">Open Settings</a><a class="button ghost" href="/pairs">Open Playlists</a></div>
+</section>
+{% endblock %}

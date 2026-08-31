@@ -38,6 +38,31 @@ class AppConfiguration(Base):
     )
 
 
+class LocalAdministrator(Base):
+    """The single local OPS operator credential, stored only as a password verifier."""
+
+    __tablename__ = "local_administrator"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    password_hash: Mapped[str] = mapped_column(String(512), nullable=False)
+    session_generation: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    locked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    password_changed_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class LoginRateLimit(Base):
+    """Short-lived, privacy-preserving rate-limit state keyed by a hashed client address."""
+
+    __tablename__ = "login_rate_limits"
+
+    source_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    window_started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    failed_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+
+
 class SyncPair(Base):
     """The two provider accounts and playlist IDs participating in a sync."""
 

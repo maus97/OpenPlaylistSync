@@ -17,11 +17,30 @@ from ops.auth.youtube_music import YouTubeMusicAuthService
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
-from ops.models import ProviderAccount, SyncAction, SyncBaseline, SyncPair, SyncRun
+from ops.models import (
+    LocalAdministrator,
+    ProviderAccount,
+    SyncAction,
+    SyncBaseline,
+    SyncPair,
+    SyncRun,
+)
 from ops.providers.base import ProviderError
 from ops.providers.factory import create_provider
 from ops.security.crypto import CredentialCipher, CredentialEncryptionError
 from ops.security.csrf import csrf_context, require_csrf
+from ops.security.local_auth import (
+    PasswordPolicyError,
+    administrator,
+    change_password,
+    create_administrator,
+    is_locked,
+    record_failure,
+    record_success,
+    source_is_limited,
+    source_key,
+    verify_password,
+)
 from ops.storage.repositories import (
     ProviderAccountRepository,
     SyncPairRepository,
@@ -45,6 +64,117 @@ templates.context_processors.append(csrf_context)
 
 def settings(session: Annotated[Session, Depends(get_db)]) -> Settings:
     return load_app_settings(session)
+
+
+def _authenticated_session(request: Request, record: LocalAdministrator) -> None:
+    request.session.clear()
+    request.session["local_admin_authenticated"] = True
+    request.session["local_admin_session_generation"] = record.session_generation
+
+
+@router.get(
+    "/auth/setup", response_class=HTMLResponse, response_model=None, include_in_schema=False
+)
+def local_administrator_setup(
+    request: Request, session: Annotated[Session, Depends(get_db)]
+) -> HTMLResponse | RedirectResponse:
+    """Show the one-time local administrator password setup page."""
+
+    if administrator(session) is not None:
+        return RedirectResponse("/auth/login", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="local_auth_setup.html")
+
+
+@router.post(
+    "/auth/setup", response_class=HTMLResponse, response_model=None, include_in_schema=False
+)
+def save_local_administrator(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    password: Annotated[str, Form()],
+    password_confirmation: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> HTMLResponse | RedirectResponse:
+    if administrator(session) is not None:
+        return RedirectResponse("/auth/login", status_code=status.HTTP_303_SEE_OTHER)
+    if password != password_confirmation:
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_setup.html",
+            context={"error": "The passwords do not match."},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    try:
+        record = create_administrator(session, password)
+    except PasswordPolicyError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_setup.html",
+            context={"error": str(exc)},
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    _authenticated_session(request, record)
+    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get(
+    "/auth/login", response_class=HTMLResponse, response_model=None, include_in_schema=False
+)
+def local_administrator_login(
+    request: Request, session: Annotated[Session, Depends(get_db)]
+) -> HTMLResponse | RedirectResponse:
+    record = administrator(session)
+    if record is None:
+        return RedirectResponse("/auth/setup", status_code=status.HTTP_303_SEE_OTHER)
+    if (
+        request.session.get("local_admin_authenticated")
+        and request.session.get("local_admin_session_generation") == record.session_generation
+    ):
+        return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+    return templates.TemplateResponse(request=request, name="local_auth_login.html")
+
+
+@router.post(
+    "/auth/login", response_class=HTMLResponse, response_model=None, include_in_schema=False
+)
+def authenticate_local_administrator(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    password: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> HTMLResponse | RedirectResponse:
+    record = administrator(session)
+    if record is None:
+        return RedirectResponse("/auth/setup", status_code=status.HTTP_303_SEE_OTHER)
+    key = source_key(request.client.host if request.client else None)
+    if is_locked(record) or source_is_limited(session, key):
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_login.html",
+            context={
+                "error": "Sign-in is temporarily unavailable. Please wait 15 minutes and try again."
+            },
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+        )
+    if not verify_password(password, record.password_hash):
+        record_failure(session, record, key)
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_login.html",
+            context={"error": "Incorrect password."},
+            status_code=status.HTTP_401_UNAUTHORIZED,
+        )
+    record_success(session, record)
+    _authenticated_session(request, record)
+    return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/auth/logout", response_class=RedirectResponse, include_in_schema=False)
+def logout_local_administrator(
+    request: Request, _: Annotated[None, Depends(require_csrf)] = None
+) -> RedirectResponse:
+    request.session.clear()
+    return RedirectResponse("/auth/login", status_code=status.HTTP_303_SEE_OTHER)
 
 
 def provider_for_account(session: Session, app_settings: Settings, account: ProviderAccount) -> Any:
@@ -144,11 +274,38 @@ def index(request: Request, app_settings: Annotated[Settings, Depends(settings)]
     )
 
 
-@router.get("/setup", response_class=HTMLResponse, include_in_schema=False)
-def setup_page(request: Request) -> HTMLResponse:
-    """Show the one-time provider setup instructions in a dedicated screen."""
+@router.get("/setup", response_class=RedirectResponse, include_in_schema=False)
+def setup_page() -> RedirectResponse:
+    """Keep the old setup URL pointing at the merged settings screen."""
 
-    return templates.TemplateResponse(request=request, name="setup.html")
+    return RedirectResponse("/settings", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.get("/setup/spotify", response_class=HTMLResponse, include_in_schema=False)
+def spotify_setup_guide(
+    request: Request, app_settings: Annotated[Settings, Depends(settings)]
+) -> HTMLResponse:
+    """Show detailed first-time Spotify developer setup instructions."""
+
+    return templates.TemplateResponse(
+        request=request,
+        name="setup_spotify.html",
+        context={"redirect_uri": app_settings.spotify_redirect_uri},
+    )
+
+
+@router.get("/setup/youtube_music", response_class=HTMLResponse, include_in_schema=False)
+def youtube_music_setup_guide(request: Request) -> HTMLResponse:
+    """Show detailed first-time Google Cloud and YouTube Music setup instructions."""
+
+    return templates.TemplateResponse(request=request, name="setup_youtube_music.html")
+
+
+@router.get("/about", response_class=HTMLResponse, include_in_schema=False)
+def about_page(request: Request) -> HTMLResponse:
+    """Explain OPS's purpose, design motivation, and license."""
+
+    return templates.TemplateResponse(request=request, name="about.html")
 
 
 @router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
@@ -225,6 +382,51 @@ def save_settings_route(
     if scheduler is not None:
         scheduler.reconfigure(load_app_settings(session, base_settings))
     return RedirectResponse("/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post(
+    "/settings/password", response_class=HTMLResponse, response_model=None, include_in_schema=False
+)
+def change_local_administrator_password(
+    request: Request,
+    session: Annotated[Session, Depends(get_db)],
+    current_password: Annotated[str, Form()],
+    new_password: Annotated[str, Form()],
+    password_confirmation: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> HTMLResponse | RedirectResponse:
+    """Change the local password after proving knowledge of the current password."""
+
+    record = session.get(LocalAdministrator, 1)
+    error: str | None = None
+    if record is None or not verify_password(current_password, record.password_hash):
+        error = "Current password is incorrect."
+    elif new_password != password_confirmation:
+        error = "The new passwords do not match."
+    else:
+        try:
+            change_password(session, record, new_password)
+        except PasswordPolicyError as exc:
+            error = str(exc)
+    if error:
+        app_settings = load_app_settings(session)
+        return templates.TemplateResponse(
+            request=request,
+            name="settings.html",
+            context={
+                "password_error": error,
+                "spotify_client_id": app_settings.spotify_client_id or "",
+                "spotify_redirect_uri": app_settings.spotify_redirect_uri,
+                "spotify_secret_saved": bool(app_settings.spotify_client_secret),
+                "ytmusic_client_id": app_settings.ytmusic_client_id or "",
+                "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
+                "scheduler_enabled": app_settings.scheduler_enabled,
+                "sync_interval_minutes": app_settings.sync_interval_minutes,
+            },
+            status_code=status.HTTP_400_BAD_REQUEST,
+        )
+    _authenticated_session(request, record)
+    return RedirectResponse("/settings?password_changed=1", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/healthz", tags=["system"])
@@ -356,6 +558,10 @@ def youtube_music_complete(
         app_settings.ytmusic_client_secret,
     )
     token = service.exchange_device_code(device_code)
+    if not token.get("access_token"):
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music", status_code=status.HTTP_303_SEE_OTHER
+        )
     token["expires_at"] = (
         datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
     ).isoformat()
@@ -391,13 +597,29 @@ def pairs(
     initial_sync_policy: str | None = None,
 ) -> HTMLResponse:
     app_settings = load_app_settings(session)
-    accounts = list(
+    saved_accounts = list(
         session.scalars(
             select(ProviderAccount)
             .where(ProviderAccount.provider_name.in_(SUPPORTED_PROVIDERS))
             .order_by(ProviderAccount.id)
         )
     )
+    accounts: list[ProviderAccount] = []
+    provider_errors: dict[int, str] = {}
+    cipher = CredentialCipher(app_settings.credential_encryption_key or "")
+    account_repo = ProviderAccountRepository(session, cipher)
+    for account in saved_accounts:
+        try:
+            credentials = account_repo.load_credentials(account)
+        except CredentialEncryptionError:
+            provider_errors[account.id] = (
+                "Saved authorization could not be read; reconnect the account"
+            )
+            continue
+        if not credentials.get("access_token"):
+            provider_errors[account.id] = "Authorization did not complete; reconnect the account"
+            continue
+        accounts.append(account)
     provider_status = {
         "spotify": {
             "configured": all(
@@ -431,7 +653,6 @@ def pairs(
     if playlist_created:
         connection_message = "Playlist created. Choose both playlists, then create the pair."
     playlist_options = []
-    provider_errors: dict[int, str] = {}
     for account in accounts:
         try:
             provider = provider_for_account(session, app_settings, account)
@@ -692,12 +913,21 @@ def sync_plan(
         raise HTTPException(status_code=404, detail="sync pair not found")
     try:
         plan = SyncCoordinator(session, app_settings, create_provider).preview(pair)
+        unresolved_tracks = SyncCoordinator(
+            session, app_settings, create_provider
+        ).unresolved_actions(pair, plan)
     except (ValueError, CredentialEncryptionError, ProviderError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
     return templates.TemplateResponse(
         request=request,
         name="sync_plan.html",
-        context={"pair": pair, "plan": plan, "fingerprint": plan_fingerprint(plan), "error": None},
+        context={
+            "pair": pair,
+            "plan": plan,
+            "fingerprint": plan_fingerprint(plan),
+            "error": None,
+            "unresolved_tracks": unresolved_tracks,
+        },
     )
 
 
@@ -726,6 +956,7 @@ def apply_sync_plan(
     session: Annotated[Session, Depends(get_db)],
     confirmation: Annotated[str, Form()] = "",
     fingerprint: Annotated[str, Form()] = "",
+    skip_unresolved: Annotated[str | None, Form()] = None,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse:
     pair = SyncPairRepository(session).get(pair_id)
@@ -740,6 +971,7 @@ def apply_sync_plan(
             pair,
             plan,
             Approval(plan_fingerprint=fingerprint, confirmation=confirmation),
+            skip_unresolved=skip_unresolved is not None,
         )
     except (
         ValueError,
@@ -759,5 +991,6 @@ def apply_sync_plan(
             "plan": plan,
             "fingerprint": fingerprint,
             "error": error,
+            "unresolved_tracks": (),
         },
     )

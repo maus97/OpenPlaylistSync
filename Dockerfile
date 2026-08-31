@@ -10,7 +10,7 @@ WORKDIR /app
 
 RUN addgroup --system ops && adduser --system --ingroup ops ops
 
-COPY pyproject.toml README.md requirements.lock ./
+COPY pyproject.toml README.md LICENSE requirements.lock ./
 COPY src ./src
 COPY migrations ./migrations
 COPY alembic.ini ./

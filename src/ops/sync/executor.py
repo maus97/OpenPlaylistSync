@@ -1,6 +1,7 @@
 """Apply approved reconciliation plans through provider adapters."""
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass
 from typing import Protocol
 
 from ops.providers.types import ProviderTrack
@@ -20,6 +21,13 @@ class SyncProvider(Protocol):
 
 class PlanExecutionError(RuntimeError):
     """Raised when an approved plan cannot be fully prepared or applied."""
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionResult:
+    """The exact actions applied or deliberately skipped after operator review."""
+
+    skipped_indices: tuple[int, ...] = ()
 
 
 def _provider_track(track: TrackState) -> ProviderTrack:
@@ -46,23 +54,31 @@ class SyncExecutor:
         source_playlist_id: str,
         target_playlist_id: str,
         approval: Approval | None = None,
+        skip_unresolved: bool = False,
+        pre_resolved_tracks: Mapping[int, ProviderTrack] | None = None,
         on_action_completed: Callable[[int], None] | None = None,
         on_track_resolved: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
-    ) -> None:
+    ) -> ExecutionResult:
         validate_approval(plan, approval)
-        prepared: list[tuple[ReconciliationAction, ProviderTrack]] = []
+        prepared: list[tuple[int, ReconciliationAction, ProviderTrack]] = []
+        skipped_indices: list[int] = []
 
-        for action in plan.actions:
+        for index, action in enumerate(plan.actions):
             provider = source_provider if action.side is Side.SOURCE else target_provider
             provider_track = _provider_track(action.track)
             if action.action is ActionType.ADD_TRACK:
-                resolved = provider.search_track(provider_track)
+                resolved = (pre_resolved_tracks or {}).get(index)
                 if resolved is None:
+                    resolved = provider.search_track(provider_track)
+                if resolved is None:
+                    if skip_unresolved:
+                        skipped_indices.append(index)
+                        continue
                     raise PlanExecutionError(f"track could not be resolved: {action.track.title}")
                 provider_track = resolved
-            prepared.append((action, provider_track))
+            prepared.append((index, action, provider_track))
 
-        for index, (action, provider_track) in enumerate(prepared):
+        for index, action, provider_track in prepared:
             provider = source_provider if action.side is Side.SOURCE else target_provider
             playlist_id = source_playlist_id if action.side is Side.SOURCE else target_playlist_id
             if action.action is ActionType.ADD_TRACK:
@@ -73,3 +89,4 @@ class SyncExecutor:
                 provider.remove_tracks(playlist_id, [provider_track])
             if on_action_completed is not None:
                 on_action_completed(index)
+        return ExecutionResult(skipped_indices=tuple(skipped_indices))

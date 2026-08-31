@@ -1,0 +1,14 @@
+{% extends "base.html" %}
+{% block title %}Unlock OPS{% endblock %}
+{% block content %}
+<section class="hero compact-hero"><div><p class="eyebrow">LOCAL ACCESS</p><h1>Unlock OPS.</h1><p class="lede">Enter your local administrator password to continue.</p></div><div class="hero-orb orb-green" aria-hidden="true"></div></section>
+<section class="card auth-card">
+  {% if error %}<div class="error-alert">{{ error }}</div>{% endif %}
+  <form method="post" action="/auth/login">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>Password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
+    <p class="field-help">Repeated incorrect attempts are rate-limited and temporarily locked out.</p>
+    <div class="hero-actions"><button class="button primary" type="submit">Unlock</button></div>
+  </form>
+</section>
+{% endblock %}

@@ -14,9 +14,10 @@ review and explicit safety checks.
 - Provider-neutral synchronization engine with Spotify and YouTube Music behind
   a common interface.
 - SQLite persistence through SQLAlchemy and Alembic.
-- Docker-first deployment with a portable TrueNAS SCALE path.
+- Docker-first deployment with persistent volume support.
 - No telemetry and no hardcoded credentials.
 - Credentials encrypted at rest before they are persisted.
+- First-run local administrator password, signed sessions, and brute-force lockout.
 - Non-destructive initial synchronization.
 - Three-way reconciliation against the previous successful baseline.
 - Explicit safety checks before destructive actions.
@@ -31,8 +32,9 @@ and decisions that remain open. The
 ordered roadmap, release gates, and definition of done for taking the current
 milestone to dependable real-world synchronization.
 
-For browser setup instructions, open **Setup** in OPS. For server, Docker, and
-TrueNAS deployment instructions, read the [deployment guide](docs/deployment.md).
+For browser setup instructions, open **Settings** in OPS and select a provider
+title for its detailed guide. For server and Docker deployment instructions,
+read the [deployment guide](docs/deployment.md).
 
 ## Local development
 
@@ -85,7 +87,7 @@ port `8000`. The container runs as a non-root user.
 
 For a normal server, change the public hostname and redirect address in the
 provider dashboards before connecting accounts. See the deployment guide for
-the reverse-proxy, HTTPS, backup, update, and TrueNAS steps.
+the reverse-proxy, HTTPS, backup, and update steps.
 
 ## Repository status
 
@@ -121,9 +123,8 @@ Before using valuable real playlists:
 
 ## Production setup
 
-For real providers, open `/setup`, then enter the OAuth client values through
-the GUI at `/settings`.
-OPS automatically creates local session and encryption keys in the persistent
+For real providers, open `/settings`; the Spotify and YouTube Music titles link
+to detailed first-time setup guides. OPS automatically creates local session and encryption keys in the persistent
 data directory when deployment values are not supplied. The optional `.env`
 file is intended for deployment overrides, not normal operator setup.
 
@@ -134,9 +135,9 @@ Review each later plan before applying it.
 
 ### Provider access setup
 
-The same instructions are available on the **Setup** page. No provider
-passwords are entered into OPS; the provider authorization pages handle account
-approval.
+The same instructions are available from the provider titles on the **Settings**
+page. No provider passwords are entered into OPS; the provider authorization
+pages handle account approval.
 
 #### Spotify
 
@@ -175,3 +176,9 @@ matching, creation, additions, and removals use the official
 private YouTube Music endpoints. Google Cloud's
 [authorization credential guide](https://developers.google.com/youtube/registering_an_application)
 explains the OAuth credential types.
+
+## License
+
+OPS is distributed under the [GNU Affero General Public License v3 or later](LICENSE).
+
+AGPL keeps modified versions open and requires source access for users interacting with modified network deployments. It does not prohibit selling copies or charging for hosting or support; a no-commercial-use restriction would not meet the open-source definition.

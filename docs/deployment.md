@@ -8,8 +8,9 @@ volume. Do not expose it directly to the public internet.
 
 1. Choose the address where you will open OPS, for example
    `https://ops.example.net` on a private network or behind a VPN.
-2. Configure HTTPS and operator authentication in a reverse proxy before
-   making the service available outside the host computer.
+2. Configure HTTPS in a reverse proxy before making the service available
+   outside the host computer. OPS has its own local administrator password,
+   but HTTPS is still required to protect that password in transit.
 3. Add the matching Spotify redirect address in the Spotify Developer Dashboard:
    `https://ops.example.net/auth/spotify/callback`.
 4. Set `OPS_SESSION_COOKIE_SECURE=true` when OPS is served through HTTPS.
@@ -29,19 +30,23 @@ volume. Do not expose it directly to the public internet.
 
 4. Open `http://SERVER-IP:8000` from your trusted network, or use the HTTPS
    address configured in your reverse proxy.
-5. Open **Setup** in OPS, then add the Spotify and Google client details in
-   **Settings**. Do not put normal operator credentials in a shell command.
+5. On the first visit, create and confirm the local administrator password.
+   OPS will require it for later browser sessions. Then open **Settings** and
+   follow the Spotify and YouTube Music guides linked from each provider title.
+   Do not put normal operator credentials in a shell command.
 
 The named `ops-data` volume contains `/data/ops.db`, `.ops-credential-key`, and
 `.ops-session-secret`. Keep all three together.
 
 ## Reverse proxy
 
-Use an authenticated HTTPS reverse proxy such as Caddy, Nginx Proxy Manager, or
-Traefik. Proxy requests to `http://ops:8000` on the Docker network, restrict
-access to trusted users, and forward the original host and HTTPS scheme. OPS
-does not currently provide its own login screen, so proxy authentication is a
-requirement for remote access.
+Use an HTTPS reverse proxy such as Caddy, Nginx Proxy Manager, or Traefik.
+Proxy requests to `http://ops:8000` on the Docker network, restrict access to
+trusted users, and forward the original host and HTTPS scheme. OPS provides a
+local administrator password, with scrypt password hashing, signed sessions,
+five failed attempts before a 15-minute account lockout, and an additional
+per-client rate limit. A proxy or VPN access policy is still recommended as a
+network boundary; do not expose OPS directly to the public internet.
 
 After the proxy is working, update Spotify's redirect address to the external
 HTTPS URL and reconnect Spotify from the OPS interface. Google device-code
@@ -80,13 +85,3 @@ accounts, pairs, and latest run history before applying a new sync.
 
 Run only one OPS container against a SQLite data volume. Multiple replicas can
 produce concurrent writes and are not supported.
-
-## TrueNAS SCALE
-
-Create a dedicated dataset for OPS data, then deploy the supplied Compose
-configuration as a custom app or translate it into the SCALE custom-app form.
-Mount the dataset at `/data`, preserve write access for the container's `ops`
-user, publish port 8000 only on a trusted network, and place remote access
-behind an authenticated HTTPS reverse proxy. OPS uses no TrueNAS APIs or
-TrueNAS-specific code, so the same image and data layout work on a normal Docker
-server.

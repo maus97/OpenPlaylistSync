@@ -26,11 +26,11 @@
       <a class="button ghost" href="/auth/youtube_music/start">Connect YouTube Music</a>
       {% if accounts|selectattr('provider_name', 'equalto', 'youtube_music')|list %}<form method="post" action="/accounts/youtube_music/disconnect"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="button ghost danger-text" type="submit">Disconnect</button></form>{% endif %}
     </div>
-    {% if not provider_status.spotify.configured or not provider_status.youtube_music.configured %}<p class="muted-copy setup-hint">Start on the <a href="/setup">setup page</a>, then add the app details in <a href="/settings">Settings</a>.</p>{% endif %}
+    {% if not provider_status.spotify.configured or not provider_status.youtube_music.configured %}<p class="muted-copy setup-hint">Add missing app details in <a href="/settings">Settings</a>.</p>{% endif %}
   </article>
   <article class="card">
     <div class="card-heading"><span class="icon-bubble green">✓</span><div><h2>How syncing works</h2><p>First sync adds missing tracks only. Later removals always need a typed confirmation.</p></div></div>
-    <a class="text-link" href="/setup#first-sync">Read the safety notes →</a>
+    <a class="text-link" href="/settings#first-sync">Read the safety notes →</a>
   </article>
 </section>
 
@@ -38,7 +38,7 @@
   <div class="section-heading"><div><p class="eyebrow">SAVED PAIRS</p><h2>Playlist pairs</h2></div><span class="pill">{{ pairs|length }} total</span></div>
   {% if pairs %}
   <div class="table-wrap"><table><thead><tr><th>Source</th><th>Target</th><th>Status</th><th></th></tr></thead><tbody>
-    {% for pair in pairs %}<tr><td><strong>{{ pair.source_name }}</strong><br><span class="muted-copy">{{ pair.source_provider|replace('_', ' ')|title }}</span></td><td><strong>{{ pair.target_name }}</strong><br><span class="muted-copy">{{ pair.target_provider|replace('_', ' ')|title }}</span></td><td><span class="status-dot {{ 'active' if pair.enabled else 'inactive' }}"></span>{{ 'Ready' if pair.enabled else 'Paused' }}</td><td><a class="text-link" href="/sync/plan/{{ pair.id }}">Review</a><form class="inline-form" method="post" action="/pairs/{{ pair.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-link" type="submit">{{ 'Pause' if pair.enabled else 'Resume' }}</button></form><form class="inline-form" method="post" action="/pairs/{{ pair.id }}/delete"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-link danger-text" type="submit">Delete</button></form></td></tr>{% endfor %}
+    {% for pair in pairs %}<tr><td><strong>{{ pair.source_name }}</strong><br><span class="muted-copy">{{ pair.source_provider|replace('_', ' ')|title }}</span></td><td><strong>{{ pair.target_name }}</strong><br><span class="muted-copy">{{ pair.target_provider|replace('_', ' ')|title }}</span></td><td><span class="status-dot {{ 'active' if pair.enabled else 'inactive' }}"></span>{{ 'Ready' if pair.enabled else 'Paused' }}</td><td><div class="table-actions"><a class="text-link" data-loading-message="Preparing review…" href="/sync/plan/{{ pair.id }}">Review</a><form class="inline-form" method="post" action="/pairs/{{ pair.id }}/toggle"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-link" type="submit">{{ 'Pause' if pair.enabled else 'Resume' }}</button></form><form class="inline-form" method="post" action="/pairs/{{ pair.id }}/delete"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="text-link danger-text" type="submit">Delete</button></form></div></td></tr>{% endfor %}
   </tbody></table></div>
   {% else %}<div class="empty-state"><span class="empty-icon">✦</span><h3>No pairs yet</h3><p>Connect both services, then choose or create the playlists below.</p></div>{% endif %}
 </section>
