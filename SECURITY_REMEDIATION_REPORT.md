@@ -159,6 +159,12 @@ no-new-privileges, PID/memory/CPU limits, an init process, health check, and
 loopback-only default publishing. The current patched image had zero Critical or
 High vulnerabilities in both Docker Scout and Trivy.
 
+Settings now provides an HTTPS-mode switch. The preference is encrypted with
+the other GUI configuration, takes effect after restart, and controls Secure
+session cookies and HSTS. An explicit `OPS_SESSION_COOKIE_SECURE` value locks
+the switch and provides an administrative recovery override. TLS certificates
+and termination remain the reverse proxy's responsibility.
+
 The live deployment was not restarted or modified. Its final TLS, proxy, port,
 volume, and cookie state must be checked after deployment.
 
@@ -189,7 +195,7 @@ manual administrative actions.
 
 ## 9. Tests
 
-- Python 3.12.14 locked environment: **68 passed**.
+- Python 3.12.14 locked environment: **69 passed**.
 - Ruff 0.16.3 formatting: **passed** across 74 files.
 - Ruff lint: **passed**.
 - Bandit 1.9.4: **passed**, with documented narrow suppressions for empty
@@ -240,10 +246,11 @@ created, changed, or deleted.
 3. Back up the existing data and secret/key material before deployment. Verify
    the exact Compose volume names first.
 4. Configure an HTTPS reverse proxy or private VPN boundary. Set
-   `OPS_ENVIRONMENT=production`, `OPS_SESSION_COOKIE_SECURE=true`, the exact
-   external hostname in `OPS_ALLOWED_HOSTS`, and only known proxy addresses in
-   `OPS_TRUSTED_PROXY_IPS`. Keep direct port 8000 loopback-only or unreachable
-   from untrusted clients.
+   `OPS_ENVIRONMENT=production`, the exact external hostname in
+   `OPS_ALLOWED_HOSTS`, and only known proxy addresses in
+   `OPS_TRUSTED_PROXY_IPS`. Enable **HTTPS mode** in Settings and restart, or set
+   `OPS_SESSION_COOKIE_SECURE=true` as a deployment override. Keep direct port
+   8000 loopback-only or unreachable from untrusted clients.
 5. Update Spotify's registered callback to the exact HTTPS URL and reconnect if
    the callback origin changes. Reconnect Google/YouTube to grant the narrower
    scope and confirm OPS displays the expected channel identity.

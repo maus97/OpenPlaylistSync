@@ -21,21 +21,30 @@ from ops.security.logging import install_sensitive_query_filter
 from ops.security.middleware import (
     LocalAuthenticationMiddleware,
     RequestBodyLimitMiddleware,
+    RuntimeSecurityMode,
     SecurityHeadersMiddleware,
 )
 from ops.storage.repositories import SyncPairRepository
 from ops.sync.coordinator import SyncCoordinator
 
 
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    scheduler = SchedulerService(get_settings(), sync_job=run_scheduled_sync)
-    scheduler.start()
-    app.state.scheduler = scheduler
-    try:
-        yield
-    finally:
-        scheduler.shutdown()
+def _lifespan(base_settings: Settings, *, load_gui_settings: bool):
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        active_settings = base_settings
+        if load_gui_settings:
+            with SessionLocal() as session:
+                active_settings = load_app_settings(session, base_settings)
+        app.state.security_mode.https_enabled = active_settings.https_mode_enabled
+        scheduler = SchedulerService(active_settings, sync_job=run_scheduled_sync)
+        scheduler.start()
+        app.state.scheduler = scheduler
+        try:
+            yield
+        finally:
+            scheduler.shutdown()
+
+    return lifespan
 
 
 def run_scheduled_sync() -> None:
@@ -54,15 +63,17 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
     """Create the FastAPI application."""
 
     settings = app_settings or get_settings()
+    load_gui_settings = app_settings is None
     if not settings.session_secret or len(settings.session_secret) < 32:
         raise RuntimeError("a session secret of at least 32 characters is required")
-    secure_cookie = (
-        settings.session_cookie_secure
-        if settings.session_cookie_secure is not None
-        else settings.environment == "production"
-    )
+    security_mode = RuntimeSecurityMode(https_enabled=settings.https_mode_enabled)
     install_sensitive_query_filter()
-    app = FastAPI(title=settings.app_name, version=__version__, lifespan=lifespan)
+    app = FastAPI(
+        title=settings.app_name,
+        version=__version__,
+        lifespan=_lifespan(settings, load_gui_settings=load_gui_settings),
+    )
+    app.state.security_mode = security_mode
     app.mount(
         "/static",
         StaticFiles(
@@ -77,7 +88,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
         SessionMiddleware,
         secret_key=settings.session_secret or "",
         session_cookie="ops_session",
-        https_only=secure_cookie,
+        https_only=False,
         same_site="lax",
         max_age=8 * 60 * 60,
     )
@@ -85,7 +96,7 @@ def create_app(app_settings: Settings | None = None) -> FastAPI:
     app.add_middleware(TrustedHostMiddleware, allowed_hosts=settings.allowed_host_list)
     app.add_middleware(
         SecurityHeadersMiddleware,
-        hsts=bool(secure_cookie and settings.environment == "production"),
+        security_mode=security_mode,
     )
     app.include_router(router)
     return app

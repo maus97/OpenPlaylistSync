@@ -14,8 +14,10 @@ the application port directly to the public internet.
    but HTTPS is still required to protect that password in transit.
 3. Add the matching Spotify redirect address in the Spotify Developer Dashboard:
    `https://ops.example.net/auth/spotify/callback`.
-4. Set `OPS_ENVIRONMENT=production`, `OPS_SESSION_COOKIE_SECURE=true`, and
-   `OPS_ALLOWED_HOSTS=ops.example.net` when OPS is served through HTTPS.
+4. Set `OPS_ENVIRONMENT=production` and `OPS_ALLOWED_HOSTS=ops.example.net` when
+   OPS is served through HTTPS. Enable **HTTPS mode** in Settings after the proxy
+   works, then restart OPS. Alternatively, set `OPS_SESSION_COOKIE_SECURE=true`
+   as a deployment-level override that locks the GUI switch on.
 5. Set `OPS_TRUSTED_PROXY_IPS` only to the exact address or CIDR of a reverse
    proxy you operate. Do not trust arbitrary forwarded-client headers.
 6. Keep the container, database volume, secret volume, and backups private.
@@ -60,6 +62,13 @@ or place it on a private container network. OPS provides a local administrator
 password with memory-hard scrypt hashing, signed expiring sessions, atomic
 source-based throttling, and bounded verification concurrency. A proxy or VPN
 access policy is still recommended as a network boundary.
+
+The Settings **HTTPS mode** switch controls Secure session cookies and HSTS. It
+does not terminate TLS or obtain a certificate. Enable it only after the HTTPS
+address works, save, and restart the container. If a proxy problem makes the UI
+unreachable, set `OPS_SESSION_COOKIE_SECURE=false` as a temporary deployment
+override, restart, repair the proxy, then remove the override and re-enable
+HTTPS mode.
 
 After the proxy is working, update Spotify's redirect address to the external
 HTTPS URL and reconnect Spotify from the OPS interface. Google device-code

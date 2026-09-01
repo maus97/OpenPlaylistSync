@@ -47,7 +47,7 @@ Remediation and local validation are complete. Final report created. The remaini
 
 - Baseline: `pytest` on Python 3.12.14 — **48 passed**.
 - Initial host Ruff/pytest commands did not run because `uv` is absent from PATH; this is an environment limitation, not a test failure.
-- Final locked Python 3.12.14 suite — **68 passed**.
+- Final locked Python 3.12.14 suite — **69 passed**.
 - Ruff format and lint — **passed**.
 - Bandit — **passed** after manually validating narrow false-positive suppressions.
 - `pip-audit` — **no known vulnerabilities**.
@@ -57,6 +57,7 @@ Remediation and local validation are complete. Final report created. The remaini
 - Docker Scout and Trivy 0.74.0 — **0 Critical / 0 High** after installing the patched OpenSSL/libssl packages.
 - Actionlint — **passed**.
 - GitHub Actions run `33459963121` for `eca9e00` — **quality, secrets, and container jobs all passed**.
+- Added a GUI HTTPS-mode switch after the initial remediation run. It persists encrypted, applies Secure cookies and HSTS after restart, and can be locked or recovered with `OPS_SESSION_COOKIE_SECURE`. Full local gates remain green; the follow-up GitHub run is pending push.
 
 ## Final finding statuses
 

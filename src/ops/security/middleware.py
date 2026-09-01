@@ -1,5 +1,7 @@
 """Authentication, request-boundary, and browser response middleware."""
 
+from dataclasses import dataclass
+
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import RedirectResponse, Response
@@ -7,6 +9,13 @@ from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from ops.db import SessionLocal
 from ops.security.local_auth import administrator
+
+
+@dataclass
+class RuntimeSecurityMode:
+    """Mutable startup state shared by cookie and response-header handling."""
+
+    https_enabled: bool
 
 
 class LocalAuthenticationMiddleware(BaseHTTPMiddleware):
@@ -108,9 +117,9 @@ class SecurityHeadersMiddleware:
         "connect-src 'self'"
     )
 
-    def __init__(self, app: ASGIApp, *, hsts: bool = False) -> None:
+    def __init__(self, app: ASGIApp, *, security_mode: RuntimeSecurityMode) -> None:
         self.app = app
-        self.hsts = hsts
+        self.security_mode = security_mode
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http":
@@ -136,8 +145,19 @@ class SecurityHeadersMiddleware:
                 if not path.startswith("/static/") and path != "/healthz":
                     add(b"cache-control", b"no-store")
                     add(b"pragma", b"no-cache")
-                if self.hsts:
+                if self.security_mode.https_enabled:
                     add(b"strict-transport-security", b"max-age=31536000; includeSubDomains")
+                    headers = [
+                        (
+                            name,
+                            value + b"; Secure"
+                            if name.lower() == b"set-cookie"
+                            and value.lower().startswith(b"ops_session=")
+                            and b"; secure" not in value.lower()
+                            else value,
+                        )
+                        for name, value in headers
+                    ]
                 message["headers"] = headers
             await send(message)
 

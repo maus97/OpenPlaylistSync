@@ -12,7 +12,7 @@
   <div class="hero-orb orb-green" aria-hidden="true"></div>
 </section>
 
-{% if saved %}<div class="success-alert page-alert">Settings saved. You can now connect each service from the Playlists page.</div>{% endif %}
+{% if saved %}<div class="success-alert page-alert">Settings saved.{% if restart_required %} Restart OPS to apply the HTTPS mode change.{% else %} You can now connect each service from the Playlists page.{% endif %}</div>{% endif %}
 {% if password_changed == "1" %}<div class="success-alert page-alert">Password changed.</div>{% endif %}
 
 <form method="post" action="/settings">
@@ -59,9 +59,14 @@
     </article>
 
     <article class="card accent-card">
-      <div class="card-heading"><span class="icon-bubble red">▣</span><div><h2>Privacy</h2><p>Managed automatically on this server.</p></div></div>
-      <p class="muted-copy">OPS creates its local security keys on first start. Provider details and tokens are encrypted before storage.</p>
-      <p class="muted-copy">Keep OPS private or behind trusted network access. It has no telemetry or hosted account.</p>
+      <div class="card-heading"><span class="icon-bubble red">▣</span><div><h2>HTTPS mode</h2><p>Secure cookies and browser transport policy.</p></div></div>
+      <label class="checkbox-label"><input type="checkbox" name="https_mode_enabled" value="1"{% if https_mode_enabled %} checked{% endif %}{% if https_mode_locked %} disabled{% endif %}> Enable HTTPS mode</label>
+      {% if https_mode_locked %}
+      <p class="field-help">Managed by the <code>OPS_SESSION_COOKIE_SECURE</code> deployment setting.</p>
+      {% else %}
+      <p class="field-help">Enable only after OPS is available through an HTTPS reverse proxy. This switch adds Secure cookies and HSTS; it does not create a certificate. Restart OPS after changing it.</p>
+      {% endif %}
+      <p class="muted-copy">Provider details and tokens remain encrypted whether HTTPS mode is on or off.</p>
     </article>
   </section>
 

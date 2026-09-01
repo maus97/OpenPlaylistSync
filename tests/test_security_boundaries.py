@@ -10,8 +10,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
+from ops import main as main_module
 from ops.api import routes
 from ops.config import Settings
+from ops.configuration import load_app_settings, load_saved_settings
 from ops.db import Base, build_engine, get_db
 from ops.main import create_app
 from ops.models import LocalAdministrator, ProviderAccount, SyncPair
@@ -50,6 +52,7 @@ def _isolated_client(
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, autoflush=False, expire_on_commit=False)
     monkeypatch.setattr(authentication_middleware, "SessionLocal", factory)
+    monkeypatch.setattr(routes, "get_settings", lambda: settings)
     app = create_app(settings)
 
     def isolated_db() -> Generator[Session, None, None]:
@@ -146,6 +149,43 @@ def test_security_headers_trusted_host_secure_cookie_and_body_limit(
         headers={"content-type": "application/x-www-form-urlencoded"},
     )
     assert oversized.status_code == 413
+
+
+def test_https_mode_switch_is_persisted_and_applies_after_restart(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    _complete_setup(client, settings)
+    page = client.get("/settings")
+    assert "Enable HTTPS mode" in page.text
+    csrf = _csrf(page.text)
+
+    response = client.post(
+        "/settings",
+        data={"csrf_token": csrf, "https_mode_enabled": "1"},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/settings?saved=1&restart_required=1"
+    assert client.app.state.security_mode.https_enabled is False
+    with factory() as session:
+        assert load_saved_settings(session, settings)["session_cookie_secure"] is True
+        restarted_settings = load_app_settings(session, settings)
+    assert restarted_settings.https_mode_enabled is True
+
+    monkeypatch.setattr(main_module, "get_settings", lambda: settings)
+    monkeypatch.setattr(main_module, "SessionLocal", factory)
+    restarted_app = main_module.create_app()
+    with TestClient(restarted_app, base_url="https://testserver") as restarted_client:
+        assert restarted_client.get("/healthz").status_code == 200
+        assert restarted_app.state.security_mode.https_enabled is True
+
+    client.app.state.security_mode.https_enabled = True
+    client.cookies.clear()
+    secured = client.get("/auth/login")
+    assert "secure" in secured.headers["set-cookie"].casefold()
+    assert secured.headers["strict-transport-security"].startswith("max-age=31536000")
 
 
 def test_review_and_oauth_initiation_are_csrf_protected_posts(

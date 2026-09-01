@@ -16,6 +16,7 @@ GUI_SETTING_KEYS = frozenset(
         "spotify_redirect_uri",
         "ytmusic_client_id",
         "ytmusic_client_secret",
+        "session_cookie_secure",
         "scheduler_enabled",
         "sync_interval_minutes",
     }
@@ -36,6 +37,9 @@ def load_app_settings(session: Session, base: Settings | None = None) -> Setting
     base = base or get_settings()
     saved = load_saved_settings(session, base)
     updates = {key: value for key, value in saved.items() if key in GUI_SETTING_KEYS}
+    if base.session_cookie_secure is not None:
+        # An explicit deployment value is the recovery/administrative override.
+        updates.pop("session_cookie_secure", None)
     if not updates:
         return base
     return Settings(**{**base.model_dump(), **updates})

@@ -80,6 +80,14 @@ class Settings(BaseSettings):
         hosts = [item.strip() for item in self.allowed_hosts.split(",") if item.strip()]
         return hosts or ["127.0.0.1", "localhost", "testserver"]
 
+    @property
+    def https_mode_enabled(self) -> bool:
+        """Return the effective cookie/HSTS mode before GUI overrides."""
+
+        if self.session_cookie_secure is not None:
+            return self.session_cookie_secure
+        return self.environment == "production"
+
 
 def _secure_directory(path: Path) -> None:
     """Create a runtime directory with private POSIX permissions where supported."""

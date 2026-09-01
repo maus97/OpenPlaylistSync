@@ -131,6 +131,10 @@ operator setup. On a fresh installation, retrieve the one-time setup code from
 the server with `docker compose exec ops python -m ops.security.bootstrap` and
 enter it only on the first-run password page.
 
+Settings includes an **HTTPS mode** switch for reverse-proxy deployments. It
+enables Secure cookies and HSTS after a restart; the reverse proxy is still
+responsible for certificates and TLS termination.
+
 After saving settings, open `/pairs`, connect Spotify and YouTube Music, choose
 playlists, select an initial-sync policy, and review the first non-destructive
 plan. OPS saves the baseline only after the reviewed initial state is complete.

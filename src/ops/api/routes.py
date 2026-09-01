@@ -353,6 +353,7 @@ def settings_page(
     session: Annotated[Session, Depends(get_db)],
     app_settings: Annotated[Settings, Depends(settings)],
     saved: str | None = None,
+    restart_required: str | None = None,
 ) -> HTMLResponse:
     """Render the operator configuration screen without revealing secrets."""
 
@@ -361,6 +362,7 @@ def settings_page(
         name="settings.html",
         context={
             "saved": saved == "1",
+            "restart_required": restart_required == "1",
             "spotify_client_id": app_settings.spotify_client_id or "",
             "spotify_redirect_uri": app_settings.spotify_redirect_uri,
             "spotify_secret_saved": bool(app_settings.spotify_client_secret),
@@ -368,6 +370,8 @@ def settings_page(
             "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
             "scheduler_enabled": app_settings.scheduler_enabled,
             "sync_interval_minutes": app_settings.sync_interval_minutes,
+            "https_mode_enabled": app_settings.https_mode_enabled,
+            "https_mode_locked": get_settings().session_cookie_secure is not None,
         },
     )
 
@@ -384,6 +388,7 @@ def save_settings_route(
     ytmusic_client_secret: Annotated[str, Form()] = "",  # nosec B107
     clear_ytmusic_secret: Annotated[str | None, Form()] = None,
     scheduler_enabled: Annotated[str | None, Form()] = None,
+    https_mode_enabled: Annotated[str | None, Form()] = None,
     sync_interval_minutes: Annotated[int, Form()] = 60,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
@@ -391,6 +396,7 @@ def save_settings_route(
 
     base_settings = get_settings()
     saved = load_saved_settings(session, base_settings)
+    current_settings = load_app_settings(session, base_settings)
 
     def existing_secret(key: str) -> str:
         if key in saved:
@@ -414,13 +420,23 @@ def save_settings_route(
         "scheduler_enabled": scheduler_enabled is not None,
         "sync_interval_minutes": max(1, min(sync_interval_minutes, 1440)),
     }
+    restart_required = False
+    if base_settings.session_cookie_secure is None:
+        requested_https_mode = https_mode_enabled is not None
+        values["session_cookie_secure"] = requested_https_mode
+        restart_required = requested_https_mode != current_settings.https_mode_enabled
+    elif "session_cookie_secure" in saved:
+        values["session_cookie_secure"] = bool(saved["session_cookie_secure"])
     save_app_settings(session, values, base_settings)
     session.commit()
 
     scheduler = getattr(request.app.state, "scheduler", None)
     if scheduler is not None:
         scheduler.reconfigure(load_app_settings(session, base_settings))
-    return RedirectResponse("/settings?saved=1", status_code=status.HTTP_303_SEE_OTHER)
+    target = "/settings?saved=1"
+    if restart_required:
+        target += "&restart_required=1"
+    return RedirectResponse(target, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post(
@@ -471,6 +487,8 @@ def change_local_administrator_password(
                 "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
                 "scheduler_enabled": app_settings.scheduler_enabled,
                 "sync_interval_minutes": app_settings.sync_interval_minutes,
+                "https_mode_enabled": app_settings.https_mode_enabled,
+                "https_mode_locked": get_settings().session_cookie_secure is not None,
             },
             status_code=status.HTTP_400_BAD_REQUEST,
         )
