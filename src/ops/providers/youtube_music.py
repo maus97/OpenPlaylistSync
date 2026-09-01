@@ -201,18 +201,15 @@ class YouTubeMusicProvider:
         }
 
     @classmethod
-    def _artist_in_channel(cls, artist: str, candidate: ProviderTrack) -> bool:
-        """Return whether the upload channel, not just its title, identifies an artist."""
+    def _artist_is_exact_channel_name(cls, artist: str, candidate: ProviderTrack) -> bool:
+        """Return whether a channel name is exactly the requested artist's name."""
 
         artist_tokens = cls._search_tokens(artist)
         if not artist_tokens:
             return False
-        candidate_artist_tokens = cls._candidate_artist_tokens(candidate)
-        if set(artist_tokens) <= candidate_artist_tokens:
-            return True
-        compact_artist = "".join(artist_tokens)
-        compact_channel = "".join(candidate_artist_tokens)
-        return len(compact_artist) >= 4 and compact_artist in compact_channel
+        return any(
+            cls._search_tokens(channel_name) == artist_tokens for channel_name in candidate.artists
+        )
 
     @classmethod
     def _trusted_upload(cls, candidate: ProviderTrack) -> bool:
@@ -278,7 +275,7 @@ class YouTubeMusicProvider:
             if cls._artist_in_candidate(artist, candidate):
                 score += 30.0 / max(len(requested.artists), 1)
                 artist_match = True
-            if cls._artist_in_channel(artist, candidate):
+            if cls._artist_is_exact_channel_name(artist, candidate):
                 channel_artist_match = True
 
         if not artist_match and requested.artists:
@@ -286,7 +283,8 @@ class YouTubeMusicProvider:
         # A video title can name the requested artist while being an unrelated
         # re-upload.  Those videos are often blocked from playlist insertion.
         # Accept title-only attribution only from a provider-labelled Topic/VEVO
-        # source; otherwise require the artist to be identified by the channel.
+        # source; otherwise require an exact artist channel name.  A fan
+        # channel such as "Ed Sheeran on Tour" is not sufficient evidence.
         if requested.artists and not (channel_artist_match or cls._trusted_upload(candidate)):
             return 0.0
         if requested.duration_ms and candidate.duration_ms:

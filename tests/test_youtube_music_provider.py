@@ -283,6 +283,15 @@ def test_youtube_search_rejects_untrusted_reupload_that_only_names_the_artist() 
     requested = ProviderTrack(
         "spotify:celestial", "Celestial", ("Ed Sheeran",), duration_ms=210_000
     )
+    fan_upload = ProviderTrack(
+        "youtube_music:fan-channel",
+        "Ed Sheeran - Celestial (Portman Road Stadium)",
+        ("Ed Sheeran on Tour",),
+        duration_ms=198_000,
+    )
+
+    assert YouTubeMusicProvider._choose_search_candidate(requested, (fan_upload,)) is None
+
     resolved = YouTubeMusicProvider._choose_search_candidate(
         requested,
         (
@@ -292,6 +301,7 @@ def test_youtube_search_rejects_untrusted_reupload_that_only_names_the_artist() 
                 ("Nightly",),
                 duration_ms=210_000,
             ),
+            fan_upload,
             ProviderTrack(
                 "youtube_music:official",
                 "Ed Sheeran - Celestial (Official Audio)",
