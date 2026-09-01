@@ -6,7 +6,7 @@ from pathlib import Path
 from ops.config import Settings, _configured_secret, _read_or_create_secret, get_settings
 
 BOOTSTRAP_TOKEN_MINIMUM_LENGTH = 32
-BOOTSTRAP_TOKEN_FILE = ".ops-bootstrap-token"
+BOOTSTRAP_TOKEN_FILE = ".ops-bootstrap-token"  # nosec B105
 
 
 class BootstrapAuthorizationError(ValueError):

@@ -36,7 +36,12 @@ ENV PATH=/opt/venv/bin:$PATH \
     OPS_STATIC_DIR=/app/static \
     OPS_TEMPLATES_DIR=/app/templates
 
-RUN python -m pip uninstall --yes pip setuptools wheel \
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends \
+        libssl3t64=3.5.7-1~deb13u2 \
+        openssl=3.5.7-1~deb13u2 \
+    && rm -rf /var/lib/apt/lists/* \
+    && python -m pip uninstall --yes pip setuptools wheel \
     && addgroup --system --gid 10001 ops \
     && adduser --system --uid 10001 --ingroup ops --home /nonexistent --no-create-home ops \
     && mkdir -p /app /data /run/ops-secrets \

@@ -6,7 +6,7 @@ import httpx
 
 YOUTUBE_MUSIC_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube.force-ssl"
 GOOGLE_DEVICE_CODE_URL = "https://oauth2.googleapis.com/device/code"
-GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"
+GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token"  # nosec B105
 DEVICE_GRANT_TYPE = "urn:ietf:params:oauth:grant-type:device_code"
 
 
@@ -44,7 +44,7 @@ class YouTubeMusicAuthService:
                 "authorization_pending": "Google authorization is not complete yet.",
                 "slow_down": "Google asked OPS to wait before checking authorization again.",
                 "access_denied": "Google authorization was denied.",
-                "expired_token": "The Google setup code expired; start the connection again.",
+                "expired_token": "The Google setup code expired; start the connection again.",  # nosec B105
                 "invalid_client": "Google rejected the configured OAuth client.",
             }
             raise YouTubeMusicOAuthError(

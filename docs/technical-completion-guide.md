@@ -447,7 +447,7 @@ OPS can be described as fully working only when all of the following are true:
 - [Spotify rate limits](https://developer.spotify.com/documentation/web-api/concepts/rate-limits)
 - [Spotify quota modes](https://developer.spotify.com/documentation/web-api/concepts/quota-modes)
 - [Spotify February 2026 migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
-- [ytmusicapi OAuth setup](https://ytmusicapi.readthedocs.io/en/latest/setup/oauth.html)
+- [Google OAuth 2.0 for TV and limited-input devices](https://developers.google.com/identity/protocols/oauth2/limited-input-device)
 - [Google YouTube authorization credentials](https://developers.google.com/youtube/registering_an_application)
 - [YouTube Data API v3 reference](https://developers.google.com/youtube/v3/docs)
 - [Docker volume backup and restore](https://docs.docker.com/engine/storage/volumes/)

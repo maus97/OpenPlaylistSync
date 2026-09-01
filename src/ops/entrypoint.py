@@ -10,7 +10,7 @@ from alembic.config import Config
 def main() -> None:
     configuration = Config("/app/alembic.ini")
     command.upgrade(configuration, "head")
-    os.execv(
+    os.execv(  # nosec B606
         sys.executable,
         [
             sys.executable,
@@ -18,7 +18,7 @@ def main() -> None:
             "uvicorn",
             "ops.main:app",
             "--host",
-            "0.0.0.0",
+            "0.0.0.0",  # nosec B104
             "--port",
             "8000",
             "--no-access-log",

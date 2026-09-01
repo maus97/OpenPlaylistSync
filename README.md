@@ -124,9 +124,12 @@ Before using valuable real playlists:
 ## Production setup
 
 For real providers, open `/settings`; the Spotify and YouTube Music titles link
-to detailed first-time setup guides. OPS automatically creates local session and encryption keys in the persistent
-data directory when deployment values are not supplied. The optional `.env`
-file is intended for deployment overrides, not normal operator setup.
+to detailed first-time setup guides. OPS creates local session and encryption
+keys in its protected secret directory when deployment values are not supplied.
+The optional `.env` file is intended for deployment overrides, not normal
+operator setup. On a fresh installation, retrieve the one-time setup code from
+the server with `docker compose exec ops python -m ops.security.bootstrap` and
+enter it only on the first-run password page.
 
 After saving settings, open `/pairs`, connect Spotify and YouTube Music, choose
 playlists, select an initial-sync policy, and review the first non-destructive
@@ -169,8 +172,8 @@ and [playlist scopes](https://developer.spotify.com/documentation/web-api/concep
    verification URL and one-time code. Complete the approval, return to OPS,
    and choose **I completed authorization**.
 
-OPS uses the Google device-code approval flow with the
-`https://www.googleapis.com/auth/youtube` read/write scope. Playlist discovery,
+OPS uses the Google device-code approval flow with the narrower
+`https://www.googleapis.com/auth/youtube.force-ssl` read/write scope. Playlist discovery,
 matching, creation, additions, and removals use the official
 [YouTube Data API v3](https://developers.google.com/youtube/v3), rather than
 private YouTube Music endpoints. Google Cloud's

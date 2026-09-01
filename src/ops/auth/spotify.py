@@ -11,7 +11,7 @@ import httpx
 from authlib.common.security import generate_token
 
 SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
-SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"
+SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"  # nosec B105
 SPOTIFY_SCOPES = (
     "user-read-private playlist-read-private playlist-read-collaborative "
     "playlist-modify-private playlist-modify-public"

@@ -12,7 +12,7 @@ Last updated: 2026-09-01 (Australia/Sydney)
 
 ## Current phase
 
-Core remediation is implemented. A reviewable branch snapshot is being pushed before the remaining full-suite, migration, image, runtime, scanner, documentation, and CI validation pass. No live deployment has been changed.
+Remediation and local validation are complete. Final report created. The remaining external steps are GitHub CI completion/review, merge, production backup/deployment, HTTPS configuration, and production/provider verification. No live deployment was changed.
 
 ## Remediation matrix
 
@@ -47,6 +47,34 @@ Core remediation is implemented. A reviewable branch snapshot is being pushed be
 
 - Baseline: `pytest` on Python 3.12.14 — **48 passed**.
 - Initial host Ruff/pytest commands did not run because `uv` is absent from PATH; this is an environment limitation, not a test failure.
+- Final locked Python 3.12.14 suite — **68 passed**.
+- Ruff format and lint — **passed**.
+- Bandit — **passed** after manually validating narrow false-positive suppressions.
+- `pip-audit` — **no known vulnerabilities**.
+- Gitleaks 8.30.1 — **12 commits scanned; no leaks found**.
+- Fresh migration, `0009` downgrade to `0008`, and re-upgrade — **passed**.
+- Hardened image build and isolated runtime/HTTP boundary checks — **passed**.
+- Docker Scout and Trivy 0.74.0 — **0 Critical / 0 High** after installing the patched OpenSSL/libssl packages.
+- Actionlint — **passed**.
+
+## Final finding statuses
+
+| ID | Final status |
+|---|---|
+| OPS-SEC-001 | FIXED — VERIFIED |
+| OPS-SEC-002 | FIXED — REQUIRES PRODUCTION VERIFICATION |
+| OPS-SEC-003 | FIXED — VERIFIED |
+| OPS-SEC-004 | FIXED — VERIFIED |
+| OPS-SEC-005 | FIXED — VERIFIED |
+| OPS-SEC-006 | FIXED — VERIFIED |
+| OPS-SEC-007 | FIXED — VERIFIED |
+| OPS-SEC-008 | FIXED — VERIFIED |
+| OPS-SEC-009 | FIXED — VERIFIED |
+| OPS-SEC-010 | FIXED — REQUIRES PRODUCTION VERIFICATION |
+| OPS-SEC-011 | FIXED — VERIFIED |
+| OPS-SEC-012 | FIXED — REQUIRES PRODUCTION VERIFICATION |
+| OPS-SEC-013 | FIXED — VERIFIED |
+| OPS-SEC-014 | FIXED — VERIFIED (repository); MANUAL GITHUB SETTINGS REQUIRED |
 
 ## Deployment considerations and manual actions
 
@@ -67,9 +95,6 @@ Core remediation is implemented. A reviewable branch snapshot is being pushed be
 
 ## Remaining work
 
-- Run the complete Python 3.12 test and lint suites against the locked dependencies.
-- Test fresh and upgrade database migrations, including a rollback/upgrade cycle.
-- Build and start an isolated Docker Compose test project; inspect health, user, capabilities, mounts, ports, logs, and filesystem behavior; then remove only that isolated test project.
-- Re-run dependency, static-analysis, secret-history, and container-image scanners and manually triage meaningful output.
-- Finish deployment/security documentation and CI/CD hardening.
-- Re-read all findings, assign every final status, create `SECURITY_REMEDIATION_REPORT.md`, commit any follow-up corrections, and push them to the remediation branch.
+- Commit and push the validated follow-up changes and final report.
+- Observe the GitHub CI run and correct any repository-runner-only failure.
+- Manual operator actions listed in `SECURITY_REMEDIATION_REPORT.md`; these are intentionally outside this local task.

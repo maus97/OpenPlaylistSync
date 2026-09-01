@@ -377,11 +377,11 @@ def save_settings_route(
     request: Request,
     session: Annotated[Session, Depends(get_db)],
     spotify_client_id: Annotated[str, Form()] = "",
-    spotify_client_secret: Annotated[str, Form()] = "",
+    spotify_client_secret: Annotated[str, Form()] = "",  # nosec B107
     spotify_redirect_uri: Annotated[str, Form()] = "",
     clear_spotify_secret: Annotated[str | None, Form()] = None,
     ytmusic_client_id: Annotated[str, Form()] = "",
-    ytmusic_client_secret: Annotated[str, Form()] = "",
+    ytmusic_client_secret: Annotated[str, Form()] = "",  # nosec B107
     clear_ytmusic_secret: Annotated[str | None, Form()] = None,
     scheduler_enabled: Annotated[str | None, Form()] = None,
     sync_interval_minutes: Annotated[int, Form()] = 60,
@@ -450,9 +450,10 @@ def change_local_administrator_password(
         error = "Current password is incorrect."
     if error is None and new_password != password_confirmation:
         error = "The new passwords do not match."
-    if error is None:
+    if error is None and record is None:
+        error = "The local administrator account is unavailable."
+    if error is None and record is not None:
         try:
-            assert record is not None
             change_password(session, record, new_password)
         except PasswordPolicyError as exc:
             error = str(exc)
@@ -1112,7 +1113,7 @@ def apply_sync_plan(
     confirmation: Annotated[str, Form()] = "",
     fingerprint: Annotated[str, Form()] = "",
     review_id: Annotated[int | None, Form()] = None,
-    approval_token: Annotated[str, Form()] = "",
+    approval_token: Annotated[str, Form()] = "",  # nosec B107
     skip_unresolved: Annotated[str | None, Form()] = None,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse:
@@ -1166,7 +1167,7 @@ def apply_sync_plan(
             "plan": plan,
             "review": review,
             "fingerprint": fingerprint,
-            "approval_token": "",
+            "approval_token": "",  # nosec B105
             "error": error,
             "unresolved_tracks": review.unresolved_actions if review else (),
         },

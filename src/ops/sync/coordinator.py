@@ -465,7 +465,11 @@ class SyncCoordinator:
                 resolutions[index] = resolved
         return resolutions, tuple(unresolved)
 
-    def _prepared_from_run(self, run: SyncRun, token: str = "") -> PreparedReview:
+    def _prepared_from_run(
+        self,
+        run: SyncRun,
+        token: str = "",  # nosec B107
+    ) -> PreparedReview:
         if not run.plan_json:
             raise ReviewNotApplicable("the selected review has no persisted plan")
         plan = decode_plan(run.plan_json)
