@@ -182,6 +182,12 @@ operation before the first write. An action is marked complete immediately after
 its provider call. A failed action leaves the run and its completed predecessors
 visible for review; OPS never advances the baseline for that run.
 
+When a provider cannot verify an exact match, a review may include a small,
+persisted list of close candidates. These alternatives are never selected
+automatically: the operator must choose one in the review UI, and OPS verifies
+that the submitted provider ID was among that review's stored options before it
+becomes eligible for apply.
+
 ## Persistence direction
 
 The initial migration establishes these conceptual records:

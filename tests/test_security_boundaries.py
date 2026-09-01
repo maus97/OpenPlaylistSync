@@ -208,7 +208,7 @@ def test_review_and_oauth_initiation_are_csrf_protected_posts(
         session.commit()
         pair_id = pair.id
 
-    calls = {"load": 0, "prepare": 0}
+    calls = {"load": 0, "prepare": 0, "select": 0}
 
     class FakeCoordinator:
         def __init__(self, *_args, **_kwargs) -> None:
@@ -222,10 +222,13 @@ def test_review_and_oauth_initiation_are_csrf_protected_posts(
             calls["prepare"] += 1
             return SimpleNamespace(review_id=9, approval_token="one-time-token")
 
+        def select_candidate(self, _pair, _review_id, _action_index, _candidate_id):  # type: ignore[no-untyped-def]
+            calls["select"] += 1
+
     monkeypatch.setattr(routes, "SyncCoordinator", FakeCoordinator)
     displayed = client.get(f"/sync/plan/{pair_id}")
     assert displayed.status_code == 200
-    assert calls == {"load": 1, "prepare": 0}
+    assert calls == {"load": 1, "prepare": 0, "select": 0}
 
     for path in ("/auth/spotify/start", "/auth/youtube_music/start"):
         assert client.get(path).status_code == 405
@@ -241,6 +244,31 @@ def test_review_and_oauth_initiation_are_csrf_protected_posts(
     assert created.status_code == 303
     assert created.headers["location"] == f"/sync/plan/{pair_id}?review_id=9"
     assert calls["prepare"] == 1
+    assert (
+        client.post(
+            f"/sync/plan/{pair_id}/candidate",
+            data={
+                "review_id": "9",
+                "action_index": "0",
+                "candidate_id": "youtube_music:video",
+            },
+        ).status_code
+        == 403
+    )
+    assert calls["select"] == 0
+    selected = client.post(
+        f"/sync/plan/{pair_id}/candidate",
+        data={
+            "csrf_token": csrf,
+            "review_id": "9",
+            "action_index": "0",
+            "candidate_id": "youtube_music:video",
+        },
+        follow_redirects=False,
+    )
+    assert selected.status_code == 303
+    assert selected.headers["location"] == f"/sync/plan/{pair_id}?review_id=9"
+    assert calls["select"] == 1
 
 
 def test_generated_bootstrap_token_is_private_one_time_state(tmp_path: Path) -> None:

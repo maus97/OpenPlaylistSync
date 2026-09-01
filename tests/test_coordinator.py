@@ -181,6 +181,68 @@ def test_review_looks_up_duplicate_tracks_once() -> None:
     engine.dispose()
 
 
+def test_operator_can_select_a_persisted_close_match_before_apply() -> None:
+    class ManualCandidateProvider(InMemoryProvider):
+        def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
+            self.search_calls += 1
+            return None
+
+        def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:
+            return (
+                ProviderTrack(
+                    "youtube_music:manual-choice",
+                    f"{track.title} (Live)",
+                    track.artists,
+                    duration_ms=track.duration_ms,
+                ),
+            )
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="source", external_account_id="source")
+        target = ProviderAccount(provider_name="target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="source:playlist",
+            target_playlist_id="target:playlist",
+        )
+        session.add(pair)
+        session.commit()
+        providers = {
+            source.id: InMemoryProvider(
+                "source", "source:playlist", [ProviderTrack("source:one", "One", ("A",))]
+            ),
+            target.id: ManualCandidateProvider("target", "target:playlist", []),
+        }
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: providers[account.id],
+        )
+
+        review = coordinator.prepare_review(pair)
+        assert len(review.unresolved_actions) == 1
+        assert (
+            review.candidate_options[0].candidates[0].provider_track_id
+            == "youtube_music:manual-choice"
+        )
+        with pytest.raises(ValueError, match="not part of this review"):
+            coordinator.select_candidate(pair, review.review_id, 0, "youtube_music:forged")
+
+        selected = coordinator.select_candidate(
+            pair, review.review_id, 0, "youtube_music:manual-choice"
+        )
+        assert selected.unresolved_actions == ()
+        assert selected.candidate_options == ()
+        coordinator.apply(pair, selected.plan, _approval(review))
+        assert providers[target.id].tracks[0].provider_track_id == "youtube_music:manual-choice"
+    engine.dispose()
+
+
 def _approval(review) -> Approval:  # type: ignore[no-untyped-def]
     return Approval(
         plan_fingerprint(review.plan),

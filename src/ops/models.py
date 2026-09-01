@@ -145,6 +145,7 @@ class SyncRun(Base):
     summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     resolution_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_json: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_state_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     target_state_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
     approval_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)

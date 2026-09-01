@@ -28,6 +28,9 @@ class YouTubeMusicProvider:
 
     def __init__(self, access_token: str | None = None, client: httpx.Client | None = None) -> None:
         self.access_token = access_token
+        self._search_candidates_cache: dict[
+            tuple[str, tuple[str, ...], int | None], tuple[ProviderTrack, ...]
+        ] = {}
         self.client = client or httpx.Client(
             base_url="https://www.googleapis.com/youtube/v3", timeout=20
         )
@@ -365,6 +368,72 @@ class YouTubeMusicProvider:
                 return None
         return scored[0][1]
 
+    @classmethod
+    def _manual_candidate_score(cls, requested: ProviderTrack, candidate: ProviderTrack) -> float:
+        """Rank close matches for explicit operator selection, never automatic use."""
+
+        requested_title = cls._requested_title_tokens(requested.title)
+        candidate_title = cls._canonical_search_tokens(candidate.title)
+        if not requested_title or not candidate_title:
+            return 0.0
+        if not any(
+            tuple(candidate_title[offset : offset + len(requested_title)]) == requested_title
+            for offset in range(len(candidate_title) - len(requested_title) + 1)
+        ):
+            return 0.0
+
+        score = 60.0
+        artist_match = False
+        for artist in requested.artists:
+            if cls._artist_in_candidate(artist, candidate):
+                score += 25.0 / max(len(requested.artists), 1)
+                artist_match = True
+        if requested.artists and not artist_match:
+            return 0.0
+        if requested.duration_ms is not None and candidate.duration_ms is not None:
+            difference = abs(requested.duration_ms - candidate.duration_ms)
+            if difference <= 2_500:
+                score += 20.0
+            elif difference <= 15_000:
+                score += 10.0
+            else:
+                score -= 5.0
+        if cls._trusted_upload(candidate):
+            score += 10.0
+        if any(
+            cls._artist_is_exact_channel_name(artist, candidate) for artist in requested.artists
+        ):
+            score += 10.0
+        return score
+
+    def _search_candidates(self, track: ProviderTrack) -> tuple[ProviderTrack, ...]:
+        key = (track.title, track.artists, track.duration_ms)
+        cached = self._search_candidates_cache.get(key)
+        if cached is not None:
+            return cached
+        query = f"{track.title} {track.artists[0] if track.artists else ''}".strip()
+        payload = self._request(
+            "GET",
+            "/search",
+            params={
+                "part": "snippet",
+                "q": query,
+                "type": "video",
+                "videoCategoryId": "10",
+                "maxResults": "10",
+            },
+        ).json()
+        video_ids = [
+            item.get("id", {}).get("videoId") for item in payload.get("items", []) if item.get("id")
+        ]
+        candidates = tuple(
+            candidate
+            for video in self._videos([video_id for video_id in video_ids if video_id]).values()
+            if (candidate := self._track(video)) is not None
+        )
+        self._search_candidates_cache[key] = candidates
+        return candidates
+
     def list_playlists(self) -> Sequence[ProviderPlaylist]:
         return tuple(
             ProviderPlaylist(
@@ -435,27 +504,24 @@ class YouTubeMusicProvider:
         )
 
     def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
-        query = f"{track.title} {track.artists[0] if track.artists else ''}".strip()
-        payload = self._request(
-            "GET",
-            "/search",
-            params={
-                "part": "snippet",
-                "q": query,
-                "type": "video",
-                "videoCategoryId": "10",
-                "maxResults": "10",
-            },
-        ).json()
-        video_ids = [
-            item.get("id", {}).get("videoId") for item in payload.get("items", []) if item.get("id")
-        ]
-        candidates = tuple(
-            candidate
-            for video in self._videos([video_id for video_id in video_ids if video_id]).values()
-            if (candidate := self._track(video)) is not None
+        return self._choose_search_candidate(track, self._search_candidates(track))
+
+    def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:
+        """Return bounded close matches for an explicit review-time choice."""
+
+        scored = sorted(
+            (
+                (self._manual_candidate_score(track, candidate), candidate)
+                for candidate in self._search_candidates(track)
+            ),
+            key=lambda item: (
+                item[0],
+                int(self._trusted_upload(item[1])),
+                item[1].provider_track_id,
+            ),
+            reverse=True,
         )
-        return self._choose_search_candidate(track, candidates)
+        return tuple(candidate for score, candidate in scored if score >= 70.0)
 
     def create_playlist(self, name: str, description: str | None = None) -> ProviderPlaylist:
         payload = self._request(

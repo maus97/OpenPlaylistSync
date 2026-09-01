@@ -1076,6 +1076,7 @@ def sync_plan(
             "approval_token": token,
             "error": None if review else "Create a review to check both playlists.",
             "unresolved_tracks": review.unresolved_actions if review else (),
+            "candidate_options": review.candidate_options if review else (),
         },
     )
 
@@ -1102,6 +1103,35 @@ def create_sync_review(
     return RedirectResponse(
         f"/sync/plan/{pair_id}?review_id={review.review_id}",
         status_code=status.HTTP_303_SEE_OTHER,
+    )
+
+
+@router.post("/sync/plan/{pair_id}/candidate", include_in_schema=False)
+def select_sync_candidate(
+    request: Request,
+    pair_id: int,
+    app_settings: Annotated[Settings, Depends(settings)],
+    session: Annotated[Session, Depends(get_db)],
+    review_id: Annotated[int, Form()],
+    action_index: Annotated[int, Form()],
+    candidate_id: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    """Save an explicit close-match choice without performing a provider write."""
+
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    if not request.session.get(f"sync_review_token:{review_id}"):
+        raise HTTPException(status_code=403, detail="create a review in this browser session")
+    try:
+        SyncCoordinator(session, app_settings, create_provider).select_candidate(
+            pair, review_id, action_index, candidate_id
+        )
+    except (ReviewExpired, ReviewNotApplicable, PairOperationBusy) as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return RedirectResponse(
+        f"/sync/plan/{pair_id}?review_id={review_id}", status_code=status.HTTP_303_SEE_OTHER
     )
 
 
@@ -1188,5 +1218,6 @@ def apply_sync_plan(
             "approval_token": "",  # nosec B105
             "error": error,
             "unresolved_tracks": review.unresolved_actions if review else (),
+            "candidate_options": review.candidate_options if review else (),
         },
     )

@@ -223,6 +223,13 @@ def test_youtube_search_accepts_official_video_title_without_false_lyrics_match(
 
     assert resolved is not None
     assert resolved.provider_track_id == "youtube_music:official"
+    close_candidates = provider.close_track_candidates(
+        ProviderTrack("spotify:track-1", "7 rings", ("Ariana Grande",), duration_ms=180_000)
+    )
+    assert [candidate.provider_track_id for candidate in close_candidates] == [
+        "youtube_music:official",
+        "youtube_music:lyrics",
+    ]
 
 
 def test_youtube_search_normalizes_spotify_soundtrack_labels() -> None:

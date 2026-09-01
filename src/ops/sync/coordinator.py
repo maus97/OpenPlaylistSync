@@ -52,6 +52,7 @@ REVIEW_REUSE_WINDOW = timedelta(minutes=2)
 MAX_PLAYLIST_TRACKS = 10_000
 MAX_PLAN_ACTIONS = 5_000
 MAX_REVIEW_LOOKUPS = 500
+MAX_MANUAL_CANDIDATES = 5
 
 
 class ReviewNotApplicable(ValueError):
@@ -78,10 +79,20 @@ class PreparedReview:
     approval_token: str
     status: str
     approval_expires_at: datetime | None
+    candidate_options: tuple["ManualCandidateOptions", ...] = ()
 
     @property
     def baseline_upgrade_required(self) -> bool:
         return self.status == "baseline_upgrade"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualCandidateOptions:
+    """Bounded, persisted fallback choices that require an operator decision."""
+
+    action_index: int
+    action: ReconciliationAction
+    candidates: tuple[ProviderTrack, ...]
 
 
 def _utc(value: datetime) -> datetime:
@@ -135,6 +146,34 @@ def _decode_resolutions(value: str | None) -> dict[int, ProviderTrack]:
         int(index): _provider_track_from_dict(track_payload)
         for index, track_payload in payload.items()
     }
+
+
+def _encode_candidates(candidates: dict[int, tuple[ProviderTrack, ...]]) -> str | None:
+    if not candidates:
+        return None
+    return json.dumps(
+        {
+            str(index): [_provider_track_dict(track) for track in tracks]
+            for index, tracks in candidates.items()
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    )
+
+
+def _decode_candidates(value: str | None) -> dict[int, tuple[ProviderTrack, ...]]:
+    if not value:
+        return {}
+    try:
+        payload = json.loads(value)
+        return {
+            int(index): tuple(_provider_track_from_dict(track) for track in tracks)
+            for index, tracks in payload.items()
+            if isinstance(tracks, list)
+        }
+    except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+        return {}
 
 
 class SyncCoordinator:
@@ -428,15 +467,27 @@ class SyncCoordinator:
         plan: ReconciliationPlan,
         source_provider: SyncProvider,
         target_provider: SyncProvider,
-    ) -> tuple[dict[int, ProviderTrack], tuple[int, ...]]:
+    ) -> tuple[dict[int, ProviderTrack], tuple[int, ...], dict[int, tuple[ProviderTrack, ...]]]:
         resolutions = self._cached_resolutions(pair, plan)
         unresolved: list[int] = []
+        candidates_by_index: dict[int, tuple[ProviderTrack, ...]] = {}
         by_destination_and_key: dict[tuple[Side, str], ProviderTrack | None] = {}
+        candidates_by_destination_and_key: dict[tuple[Side, str], tuple[ProviderTrack, ...]] = {}
         lookups = 0
         for index, action in enumerate(plan.actions):
             if action.action is not ActionType.ADD_TRACK or index in resolutions:
                 continue
             lookup_key = (action.side, action.track.key)
+            provider = source_provider if action.side is Side.SOURCE else target_provider
+            provider_track = ProviderTrack(
+                provider_track_id=action.track.source_provider_track_id,
+                title=action.track.title,
+                artists=action.track.artists,
+                duration_ms=action.track.duration_ms,
+                isrc=action.track.isrc,
+                occurrence_id=action.track.occurrence_id,
+                position=action.track.position,
+            )
             if lookup_key in by_destination_and_key:
                 resolved = by_destination_and_key[lookup_key]
             else:
@@ -446,24 +497,21 @@ class SyncCoordinator:
                         f"review requires more than {MAX_REVIEW_LOOKUPS} provider searches; "
                         "split the playlist or establish a trusted baseline"
                     )
-                provider = source_provider if action.side is Side.SOURCE else target_provider
-                resolved = provider.search_track(
-                    ProviderTrack(
-                        provider_track_id=action.track.source_provider_track_id,
-                        title=action.track.title,
-                        artists=action.track.artists,
-                        duration_ms=action.track.duration_ms,
-                        isrc=action.track.isrc,
-                        occurrence_id=action.track.occurrence_id,
-                        position=action.track.position,
-                    )
-                )
+                resolved = provider.search_track(provider_track)
                 by_destination_and_key[lookup_key] = resolved
             if resolved is None:
                 unresolved.append(index)
+                candidate_lookup = getattr(provider, "close_track_candidates", None)
+                if callable(candidate_lookup):
+                    candidates = candidates_by_destination_and_key.get(lookup_key)
+                    if candidates is None:
+                        candidates = tuple(candidate_lookup(provider_track))[:MAX_MANUAL_CANDIDATES]
+                        candidates_by_destination_and_key[lookup_key] = candidates
+                    if candidates:
+                        candidates_by_index[index] = candidates
             else:
                 resolutions[index] = resolved
-        return resolutions, tuple(unresolved)
+        return resolutions, tuple(unresolved), candidates_by_index
 
     def _prepared_from_run(
         self,
@@ -483,6 +531,11 @@ class SyncCoordinator:
         unresolved_actions = tuple(
             plan.actions[index] for index in unresolved_indices if 0 <= index < len(plan.actions)
         )
+        candidate_options = tuple(
+            ManualCandidateOptions(index, plan.actions[index], candidates)
+            for index, candidates in _decode_candidates(run.candidate_json).items()
+            if index in unresolved_indices and 0 <= index < len(plan.actions)
+        )
         return PreparedReview(
             review_id=run.id,
             plan=plan,
@@ -490,6 +543,7 @@ class SyncCoordinator:
             approval_token=token,
             status=run.status,
             approval_expires_at=run.approval_expires_at,
+            candidate_options=candidate_options,
         )
 
     def load_review(self, pair: SyncPair, review_id: int | None = None) -> PreparedReview | None:
@@ -552,8 +606,9 @@ class SyncCoordinator:
                 )
             resolutions: dict[int, ProviderTrack] = {}
             unresolved_indices: tuple[int, ...] = ()
+            candidate_options: dict[int, tuple[ProviderTrack, ...]] = {}
             if not baseline_upgrade and not plan.conflicts:
-                resolutions, unresolved_indices = self._resolve_additions(
+                resolutions, unresolved_indices, candidate_options = self._resolve_additions(
                     pair, plan, source_provider, target_provider
                 )
             token = secrets.token_urlsafe(32)
@@ -568,6 +623,7 @@ class SyncCoordinator:
             )
             run.plan_json = encode_plan(plan)
             run.resolution_json = _encode_resolutions(resolutions)
+            run.candidate_json = _encode_candidates(candidate_options)
             run.source_state_hash = playlist_state_hash(source)
             run.target_state_hash = playlist_state_hash(target)
             run.approval_token_hash = _token_hash(token)
@@ -609,6 +665,60 @@ class SyncCoordinator:
                     SyncRunRepository(self.session).prune_previews(pair.id)
                     self.session.commit()
             raise
+        finally:
+            lease.release()
+
+    def select_candidate(
+        self,
+        pair: SyncPair,
+        review_id: int,
+        action_index: int,
+        candidate_id: str,
+    ) -> PreparedReview:
+        """Persist one operator-approved close match without changing a playlist."""
+
+        lease = acquire_pair_lease(self.session, pair.id)
+        try:
+            run = self.session.get(SyncRun, review_id)
+            if run is None or run.pair_id != pair.id or run.status != "planned":
+                raise ReviewNotApplicable("the selected review is no longer available")
+            if run.approval_consumed_at is not None:
+                raise ReviewNotApplicable("the selected review was already applied")
+            if run.approval_expires_at is None or _utc(run.approval_expires_at) <= datetime.now(
+                UTC
+            ):
+                raise ReviewExpired("the selected review has expired; create a fresh review")
+            if not run.plan_json:
+                raise ReviewNotApplicable("the selected review has no persisted plan")
+
+            plan = decode_plan(run.plan_json)
+            summary = json.loads(run.summary_json or "{}")
+            unresolved_indices = {int(value) for value in summary.get("unresolved_indices", ())}
+            if action_index not in unresolved_indices or not 0 <= action_index < len(plan.actions):
+                raise ReviewNotApplicable("that track is not awaiting a candidate choice")
+            candidates = _decode_candidates(run.candidate_json)
+            selected = next(
+                (
+                    candidate
+                    for candidate in candidates.get(action_index, ())
+                    if candidate.provider_track_id == candidate_id
+                ),
+                None,
+            )
+            if selected is None:
+                raise ReviewNotApplicable("that candidate is not part of this review")
+
+            resolutions = _decode_resolutions(run.resolution_json)
+            resolutions[action_index] = selected
+            unresolved_indices.remove(action_index)
+            candidates.pop(action_index, None)
+            summary["unresolved_indices"] = sorted(unresolved_indices)
+            run.resolution_json = _encode_resolutions(resolutions)
+            run.candidate_json = _encode_candidates(candidates)
+            run.summary_json = json.dumps(summary, sort_keys=True)
+            self.session.add(run)
+            self.session.commit()
+            return self._prepared_from_run(run)
         finally:
             lease.release()
 
@@ -779,9 +889,11 @@ class SyncCoordinator:
             )
             for index in result.skipped_indices:
                 journal[index].status = "skipped"
-                journal[
-                    index
-                ].error_summary = "track could not be resolved on the destination provider"
+                journal[index].error_summary = (
+                    "destination provider rejected the selected track after review"
+                    if index in result.provider_rejected_indices
+                    else "track could not be resolved on the destination provider"
+                )
             if result.skipped_indices:
                 SyncRunRepository(self.session).finish(
                     run,

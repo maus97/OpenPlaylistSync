@@ -4,6 +4,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Protocol
 
+from ops.providers.base import TrackUnavailable
 from ops.providers.types import ProviderTrack
 from ops.sync.domain import ActionType, ReconciliationAction, ReconciliationPlan, Side, TrackState
 from ops.sync.safety import Approval, validate_approval
@@ -38,6 +39,7 @@ class ExecutionResult:
     """The exact actions applied or deliberately skipped after operator review."""
 
     skipped_indices: tuple[int, ...] = ()
+    provider_rejected_indices: tuple[int, ...] = ()
 
 
 def _provider_track(track: TrackState) -> ProviderTrack:
@@ -74,6 +76,7 @@ class SyncExecutor:
         validate_approval(plan, approval)
         prepared: list[tuple[int, ReconciliationAction, ProviderTrack]] = []
         skipped_indices: list[int] = []
+        provider_rejected_indices: list[int] = []
         snapshot_ids = {
             Side.SOURCE: source_snapshot_id,
             Side.TARGET: target_snapshot_id,
@@ -98,7 +101,15 @@ class SyncExecutor:
             provider = source_provider if action.side is Side.SOURCE else target_provider
             playlist_id = source_playlist_id if action.side is Side.SOURCE else target_playlist_id
             if action.action is ActionType.ADD_TRACK:
-                new_snapshot = provider.add_tracks(playlist_id, [provider_track])
+                try:
+                    new_snapshot = provider.add_tracks(playlist_id, [provider_track])
+                except TrackUnavailable:
+                    # A provider can reject a video after review because of a
+                    # regional or rights restriction. Continue with the other
+                    # reviewed additions, but never advance the baseline.
+                    skipped_indices.append(index)
+                    provider_rejected_indices.append(index)
+                    continue
                 if on_track_resolved is not None:
                     on_track_resolved(action, provider_track)
             else:
@@ -111,4 +122,7 @@ class SyncExecutor:
                 snapshot_ids[action.side] = new_snapshot
             if on_action_completed is not None:
                 on_action_completed(index)
-        return ExecutionResult(skipped_indices=tuple(skipped_indices))
+        return ExecutionResult(
+            skipped_indices=tuple(skipped_indices),
+            provider_rejected_indices=tuple(provider_rejected_indices),
+        )

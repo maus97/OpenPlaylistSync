@@ -1,3 +1,4 @@
+from ops.providers.base import TrackUnavailable
 from ops.providers.types import ProviderTrack
 from ops.sync.domain import ActionType, ReconciliationAction, ReconciliationPlan, Side, TrackState
 from ops.sync.executor import SyncExecutor
@@ -87,4 +88,45 @@ def test_executor_can_skip_an_unresolved_track_after_review() -> None:
     )
 
     assert result.skipped_indices == (0,)
+    assert result.provider_rejected_indices == ()
+    assert provider.added == ["resolved-track"]
+
+
+def test_executor_continues_after_a_provider_rejects_one_reviewed_video() -> None:
+    class VideoUnavailableProvider(FakeProvider):
+        def add_tracks(self, playlist_id: str, tracks: list[ProviderTrack]) -> None:
+            if tracks[0].title == "Unavailable after review":
+                raise TrackUnavailable("video is restricted")
+            super().add_tracks(playlist_id, tracks)
+
+    provider = VideoUnavailableProvider()
+    plan = ReconciliationPlan(
+        actions=(
+            ReconciliationAction(
+                Side.TARGET,
+                ActionType.ADD_TRACK,
+                TrackState("text:first|artist", "Unavailable after review", ("Artist",), "first"),
+                "test",
+            ),
+            ReconciliationAction(
+                Side.TARGET,
+                ActionType.ADD_TRACK,
+                TrackState("text:second|artist", "Available", ("Artist",), "second"),
+                "test",
+            ),
+        ),
+        conflicts=(),
+    )
+
+    result = SyncExecutor().apply(
+        plan,
+        source_provider=provider,
+        target_provider=provider,
+        source_playlist_id="source",
+        target_playlist_id="target",
+        approval=Approval(plan_fingerprint(plan), ""),
+    )
+
+    assert result.skipped_indices == (0,)
+    assert result.provider_rejected_indices == (0,)
     assert provider.added == ["resolved-track"]
