@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from ops.providers.base import AuthorizationRequired, RateLimited
+from ops.providers.base import AuthorizationRequired, RateLimited, TrackUnavailable
 from ops.providers.types import ProviderTrack
 from ops.providers.youtube_music import YouTubeMusicProvider
 
@@ -151,6 +151,27 @@ def test_youtube_provider_reports_http_429_as_rate_limited() -> None:
         provider.search_track(ProviderTrack("spotify:track", "Song", ("Artist",)))
 
 
+def test_youtube_provider_reports_unplayable_video_as_track_unavailable() -> None:
+    provider = YouTubeMusicProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://www.googleapis.com/youtube/v3",
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(
+                    400,
+                    json={"error": {"errors": [{"reason": "videoNotPlayable"}]}},
+                )
+            ),
+        ),
+    )
+
+    with pytest.raises(TrackUnavailable, match="cannot add the selected video"):
+        provider.add_tracks(
+            "youtube_music:playlist-1",
+            [ProviderTrack("youtube_music:video-1", "Song", ("Artist",))],
+        )
+
+
 def test_youtube_search_accepts_official_video_title_without_false_lyrics_match() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         if request.url.path == "/youtube/v3/search":
@@ -256,3 +277,29 @@ def test_youtube_search_prefers_standard_topic_upload_over_acoustic_variant() ->
 
     assert resolved is not None
     assert resolved.provider_track_id == "youtube_music:topic"
+
+
+def test_youtube_search_rejects_untrusted_reupload_that_only_names_the_artist() -> None:
+    requested = ProviderTrack(
+        "spotify:celestial", "Celestial", ("Ed Sheeran",), duration_ms=210_000
+    )
+    resolved = YouTubeMusicProvider._choose_search_candidate(
+        requested,
+        (
+            ProviderTrack(
+                "youtube_music:reupload",
+                "Ed Sheeran, Pokémon - Celestial (Official Audio)",
+                ("Nightly",),
+                duration_ms=210_000,
+            ),
+            ProviderTrack(
+                "youtube_music:official",
+                "Ed Sheeran - Celestial (Official Audio)",
+                ("Ed Sheeran",),
+                duration_ms=210_000,
+            ),
+        ),
+    )
+
+    assert resolved is not None
+    assert resolved.provider_track_id == "youtube_music:official"

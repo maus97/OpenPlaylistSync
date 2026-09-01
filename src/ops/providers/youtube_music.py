@@ -12,7 +12,12 @@ from typing import Any
 
 import httpx
 
-from ops.providers.base import AuthorizationRequired, ProviderUnavailable, RateLimited
+from ops.providers.base import (
+    AuthorizationRequired,
+    ProviderUnavailable,
+    RateLimited,
+    TrackUnavailable,
+)
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
 
@@ -63,6 +68,12 @@ class YouTubeMusicProvider:
             raise RateLimited()
         if response.status_code == 403 and reason in {"insufficientPermissions", "forbidden"}:
             raise AuthorizationRequired("YouTube Music access was denied; reconnect the account")
+        if response.status_code == 400 and reason in {
+            "playlistItemsNotAccessible",
+            "videoNotFound",
+            "videoNotPlayable",
+        }:
+            raise TrackUnavailable("YouTube Music cannot add the selected video to this playlist")
         if response.status_code >= 500:
             raise ProviderUnavailable("YouTube Music is temporarily unavailable")
         if response.is_error:
@@ -167,11 +178,7 @@ class YouTubeMusicProvider:
         if not artist_tokens:
             return False
         artist_set = set(artist_tokens)
-        candidate_artist_tokens = {
-            token
-            for candidate_artist in candidate.artists
-            for token in cls._search_tokens(candidate_artist)
-        }
+        candidate_artist_tokens = cls._candidate_artist_tokens(candidate)
         if artist_set <= candidate_artist_tokens:
             return True
         candidate_title_tokens = set(cls._search_tokens(candidate.title))
@@ -184,6 +191,28 @@ class YouTubeMusicProvider:
             for token in cls._search_tokens(candidate_artist)
         )
         return len(compact_artist) >= 4 and compact_artist in compact_channels
+
+    @staticmethod
+    def _candidate_artist_tokens(candidate: ProviderTrack) -> set[str]:
+        return {
+            token
+            for candidate_artist in candidate.artists
+            for token in YouTubeMusicProvider._search_tokens(candidate_artist)
+        }
+
+    @classmethod
+    def _artist_in_channel(cls, artist: str, candidate: ProviderTrack) -> bool:
+        """Return whether the upload channel, not just its title, identifies an artist."""
+
+        artist_tokens = cls._search_tokens(artist)
+        if not artist_tokens:
+            return False
+        candidate_artist_tokens = cls._candidate_artist_tokens(candidate)
+        if set(artist_tokens) <= candidate_artist_tokens:
+            return True
+        compact_artist = "".join(artist_tokens)
+        compact_channel = "".join(candidate_artist_tokens)
+        return len(compact_artist) >= 4 and compact_artist in compact_channel
 
     @classmethod
     def _trusted_upload(cls, candidate: ProviderTrack) -> bool:
@@ -244,12 +273,21 @@ class YouTubeMusicProvider:
                 score += 20.0
 
         artist_match = False
+        channel_artist_match = False
         for artist in requested.artists:
             if cls._artist_in_candidate(artist, candidate):
                 score += 30.0 / max(len(requested.artists), 1)
                 artist_match = True
+            if cls._artist_in_channel(artist, candidate):
+                channel_artist_match = True
 
         if not artist_match and requested.artists:
+            return 0.0
+        # A video title can name the requested artist while being an unrelated
+        # re-upload.  Those videos are often blocked from playlist insertion.
+        # Accept title-only attribution only from a provider-labelled Topic/VEVO
+        # source; otherwise require the artist to be identified by the channel.
+        if requested.artists and not (channel_artist_match or cls._trusted_upload(candidate)):
             return 0.0
         if requested.duration_ms and candidate.duration_ms:
             difference = abs(requested.duration_ms - candidate.duration_ms)
