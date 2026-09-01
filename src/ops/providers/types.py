@@ -25,3 +25,4 @@ class ProviderPlaylist:
     name: str
     tracks: tuple[ProviderTrack, ...]
     description: str | None = None
+    snapshot_id: str | None = None

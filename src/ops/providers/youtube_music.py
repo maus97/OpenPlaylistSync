@@ -343,6 +343,20 @@ class YouTubeMusicProvider:
             if item.get("id")
         )
 
+    def account_identity(self) -> tuple[str, str]:
+        """Return the stable authenticated channel ID and a display label."""
+
+        payload = self._request(
+            "GET",
+            "/channels",
+            params={"part": "id,snippet", "mine": "true", "maxResults": "1"},
+        ).json()
+        channels = payload.get("items", [])
+        if not channels or not channels[0].get("id"):
+            raise ProviderUnavailable("YouTube account has no accessible channel identity")
+        channel = channels[0]
+        return str(channel["id"]), str((channel.get("snippet") or {}).get("title") or "YouTube")
+
     def get_playlist(self, playlist_id: str) -> ProviderPlaylist:
         raw_id = playlist_id.removeprefix("youtube_music:")
         playlist_payload = self._request(
@@ -381,6 +395,7 @@ class YouTubeMusicProvider:
             name=snippet.get("title", ""),
             description=snippet.get("description") or None,
             tracks=tuple(tracks),
+            snapshot_id=str(playlist.get("etag")) if playlist.get("etag") else None,
         )
 
     def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
@@ -424,7 +439,7 @@ class YouTubeMusicProvider:
             tracks=(),
         )
 
-    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> str | None:
         raw_id = playlist_id.removeprefix("youtube_music:")
         for track in tracks:
             self._request(
@@ -442,9 +457,18 @@ class YouTubeMusicProvider:
                     }
                 },
             )
+        return None
 
-    def remove_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    def remove_tracks(
+        self,
+        playlist_id: str,
+        tracks: Sequence[ProviderTrack],
+        *,
+        snapshot_id: str | None = None,
+    ) -> str | None:
+        del snapshot_id
         if any(not track.occurrence_id for track in tracks):
             raise ValueError("YouTube Music removal requires the playlist item identifier")
         for track in tracks:
             self._request("DELETE", "/playlistItems", params={"id": track.occurrence_id or ""})
+        return None

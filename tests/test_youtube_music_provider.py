@@ -113,6 +113,26 @@ def test_youtube_provider_requires_a_linked_account() -> None:
         YouTubeMusicProvider().list_playlists()
 
 
+def test_youtube_provider_binds_connection_to_stable_channel_identity() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path == "/youtube/v3/channels"
+        assert request.url.params["mine"] == "true"
+        return httpx.Response(
+            200,
+            json={"items": [{"id": "channel-123", "snippet": {"title": "Listener"}}]},
+        )
+
+    provider = YouTubeMusicProvider(
+        access_token="token",
+        client=httpx.Client(
+            base_url="https://www.googleapis.com/youtube/v3",
+            transport=httpx.MockTransport(handler),
+        ),
+    )
+
+    assert provider.account_identity() == ("channel-123", "Listener")
+
+
 def test_youtube_provider_reports_http_429_as_rate_limited() -> None:
     provider = YouTubeMusicProvider(
         access_token="token",

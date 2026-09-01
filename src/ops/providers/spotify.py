@@ -4,6 +4,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -106,6 +107,14 @@ class SpotifyProvider:
             next_url = payload.get("next")
             if not next_url:
                 return
+            parsed = urlsplit(str(next_url))
+            if not (
+                parsed.scheme == "https"
+                and parsed.hostname == "api.spotify.com"
+                and parsed.port in (None, 443)
+                and parsed.path.startswith("/v1/")
+            ):
+                raise ProviderUnavailable("Spotify returned an invalid pagination URL")
             payload = self._request("GET", next_url).json()
 
     def list_playlists(self) -> Sequence[ProviderPlaylist]:
@@ -123,7 +132,7 @@ class SpotifyProvider:
         payload = self._request(
             "GET",
             f"/playlists/{raw_id}",
-            params={"fields": "id,name,description", "market": "from_token"},
+            params={"fields": "id,name,description,snapshot_id", "market": "from_token"},
         ).json()
         # Spotify removed the old ``/tracks`` playlist endpoint in favor of
         # ``/items``. The nested track object is now named ``item``.
@@ -149,6 +158,7 @@ class SpotifyProvider:
             name=payload.get("name", ""),
             description=payload.get("description"),
             tracks=tuple(tracks),
+            snapshot_id=payload.get("snapshot_id"),
         )
 
     @staticmethod
@@ -318,22 +328,40 @@ class SpotifyProvider:
             provider_playlist_id=f"spotify:{payload['id']}", name=payload["name"], tracks=()
         )
 
-    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    @staticmethod
+    def _response_snapshot(response: httpx.Response) -> str | None:
+        try:
+            payload = response.json()
+        except ValueError:
+            return None
+        value = payload.get("snapshot_id") if isinstance(payload, dict) else None
+        return str(value) if value else None
+
+    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> str | None:
         raw_id = playlist_id.removeprefix("spotify:")
+        snapshot_id: str | None = None
         for offset in range(0, len(tracks), 100):
             uris = [
                 f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"
                 for track in tracks[offset : offset + 100]
             ]
             if uris:
-                self._request(
+                response = self._request(
                     "POST",
                     f"/playlists/{raw_id}/items",
                     headers={"Content-Type": "application/json"},
                     json={"uris": uris},
                 )
+                snapshot_id = self._response_snapshot(response) or snapshot_id
+        return snapshot_id
 
-    def remove_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    def remove_tracks(
+        self,
+        playlist_id: str,
+        tracks: Sequence[ProviderTrack],
+        *,
+        snapshot_id: str | None = None,
+    ) -> str | None:
         raw_id = playlist_id.removeprefix("spotify:")
         for offset in range(0, len(tracks), 100):
             removal_items = []
@@ -345,9 +373,14 @@ class SpotifyProvider:
                     {"uri": f"spotify:track:{track.provider_track_id.removeprefix('spotify:')}"}
                 )
             if removal_items:
-                self._request(
+                body: dict[str, Any] = {"items": removal_items}
+                if snapshot_id:
+                    body["snapshot_id"] = snapshot_id
+                response = self._request(
                     "DELETE",
                     f"/playlists/{raw_id}/items",
                     headers={"Content-Type": "application/json"},
-                    json={"items": removal_items},
+                    json=body,
                 )
+                snapshot_id = self._response_snapshot(response) or snapshot_id
+        return snapshot_id

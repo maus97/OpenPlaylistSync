@@ -2,15 +2,19 @@ services:
   ops:
     build: .
     image: open-playlist-sync:local
+    init: true
     ports:
-      - "8000:8000"
+      - "${OPS_BIND_ADDRESS:-127.0.0.1}:${OPS_BIND_PORT:-8000}:8000"
     environment:
-      OPS_ENVIRONMENT: production
+      OPS_ENVIRONMENT: ${OPS_ENVIRONMENT:-development}
       OPS_DATABASE_URL: sqlite:////data/ops.db
       OPS_DATA_DIR: /data
-      OPS_LOG_LEVEL: INFO
-      OPS_SESSION_SECRET: ${OPS_SESSION_SECRET:-}
+      OPS_SECRET_DIR: /run/ops-secrets
+      OPS_ALLOWED_HOSTS: ${OPS_ALLOWED_HOSTS:-127.0.0.1,localhost}
+      OPS_TRUSTED_PROXY_IPS: ${OPS_TRUSTED_PROXY_IPS:-}
       OPS_SESSION_COOKIE_SECURE: ${OPS_SESSION_COOKIE_SECURE:-false}
+      OPS_LOG_LEVEL: ${OPS_LOG_LEVEL:-INFO}
+      OPS_SESSION_SECRET: ${OPS_SESSION_SECRET:-}
       OPS_CREDENTIAL_ENCRYPTION_KEY: ${OPS_CREDENTIAL_ENCRYPTION_KEY:-}
       OPS_SPOTIFY_CLIENT_ID: ${OPS_SPOTIFY_CLIENT_ID:-}
       OPS_SPOTIFY_CLIENT_SECRET: ${OPS_SPOTIFY_CLIENT_SECRET:-}
@@ -19,7 +23,19 @@ services:
       OPS_YTMUSIC_CLIENT_SECRET: ${OPS_YTMUSIC_CLIENT_SECRET:-}
     volumes:
       - ops-data:/data
+      - ops-secrets:/run/ops-secrets
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    mem_limit: ${OPS_MEMORY_LIMIT:-1g}
+    cpus: ${OPS_CPU_LIMIT:-2.0}
     restart: unless-stopped
+    stop_grace_period: 20s
     healthcheck:
       test:
         - CMD
@@ -31,6 +47,8 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+      start_period: 20s
 
 volumes:
   ops-data:
+  ops-secrets:

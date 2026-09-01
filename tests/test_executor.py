@@ -1,6 +1,7 @@
 from ops.providers.types import ProviderTrack
 from ops.sync.domain import ActionType, ReconciliationAction, ReconciliationPlan, Side, TrackState
 from ops.sync.executor import SyncExecutor
+from ops.sync.safety import Approval, plan_fingerprint
 
 
 class FakeProvider:
@@ -14,7 +15,14 @@ class FakeProvider:
     def add_tracks(self, playlist_id: str, tracks: list[ProviderTrack]) -> None:
         self.added.extend(track.provider_track_id for track in tracks)
 
-    def remove_tracks(self, playlist_id: str, tracks: list[ProviderTrack]) -> None:
+    def remove_tracks(
+        self,
+        playlist_id: str,
+        tracks: list[ProviderTrack],
+        *,
+        snapshot_id: str | None = None,
+    ) -> None:
+        del snapshot_id
         self.removed.extend(track.provider_track_id for track in tracks)
 
 
@@ -38,6 +46,7 @@ def test_executor_preflights_and_applies_non_destructive_addition() -> None:
         target_provider=provider,
         source_playlist_id="source",
         target_playlist_id="target",
+        approval=Approval(plan_fingerprint(plan), ""),
     )
 
     assert provider.added == ["resolved-track"]
@@ -73,6 +82,7 @@ def test_executor_can_skip_an_unresolved_track_after_review() -> None:
         target_provider=provider,
         source_playlist_id="source",
         target_playlist_id="target",
+        approval=Approval(plan_fingerprint(plan), ""),
         skip_unresolved=True,
     )
 

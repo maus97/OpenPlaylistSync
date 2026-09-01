@@ -1,6 +1,7 @@
 """HTTP routes for health, operator flows, and the safety-first UI."""
 
 import os
+import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
@@ -9,17 +10,18 @@ from urllib.parse import urlencode
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
-from ops.auth.youtube_music import YouTubeMusicAuthService
+from ops.auth.youtube_music import YouTubeMusicAuthService, YouTubeMusicOAuthError
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
 from ops.models import (
     LocalAdministrator,
     ProviderAccount,
+    ProviderTrackMapping,
     SyncAction,
     SyncBaseline,
     SyncPair,
@@ -27,28 +29,42 @@ from ops.models import (
 )
 from ops.providers.base import ProviderError
 from ops.providers.factory import create_provider
+from ops.providers.youtube_music import YouTubeMusicProvider
+from ops.security.bootstrap import (
+    BootstrapAuthorizationError,
+    consume_bootstrap_token,
+    verify_bootstrap_token,
+)
 from ops.security.crypto import CredentialCipher, CredentialEncryptionError
 from ops.security.csrf import csrf_context, require_csrf
 from ops.security.local_auth import (
     PasswordPolicyError,
+    PasswordVerificationBusy,
     administrator,
     change_password,
     create_administrator,
-    is_locked,
-    record_failure,
+    password_verification_slot,
     record_success,
-    source_is_limited,
+    reserve_login_attempt,
     source_key,
     verify_password,
 )
+from ops.security.network import client_address
 from ops.storage.repositories import (
     ProviderAccountRepository,
     SyncPairRepository,
     SyncRunRepository,
 )
-from ops.sync.coordinator import SyncCoordinator
+from ops.sync.coordinator import (
+    AmbiguousSpotifyRemoval,
+    ReviewExpired,
+    ReviewNotApplicable,
+    SyncCoordinator,
+    TrackMappingConflict,
+)
 from ops.sync.domain import InitialSyncPolicy
 from ops.sync.executor import PlanExecutionError
+from ops.sync.leases import PairOperationBusy
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 
 router = APIRouter()
@@ -91,12 +107,23 @@ def local_administrator_setup(
 def save_local_administrator(
     request: Request,
     session: Annotated[Session, Depends(get_db)],
+    app_settings: Annotated[Settings, Depends(settings)],
+    bootstrap_code: Annotated[str, Form()],
     password: Annotated[str, Form()],
     password_confirmation: Annotated[str, Form()],
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse | RedirectResponse:
     if administrator(session) is not None:
         return RedirectResponse("/auth/login", status_code=status.HTTP_303_SEE_OTHER)
+    try:
+        verify_bootstrap_token(app_settings, bootstrap_code)
+    except BootstrapAuthorizationError as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_setup.html",
+            context={"error": str(exc)},
+            status_code=status.HTTP_403_FORBIDDEN,
+        )
     if password != password_confirmation:
         return templates.TemplateResponse(
             request=request,
@@ -106,13 +133,14 @@ def save_local_administrator(
         )
     try:
         record = create_administrator(session, password)
-    except PasswordPolicyError as exc:
+    except (PasswordPolicyError, ValueError) as exc:
         return templates.TemplateResponse(
             request=request,
             name="local_auth_setup.html",
             context={"error": str(exc)},
             status_code=status.HTTP_400_BAD_REQUEST,
         )
+    consume_bootstrap_token(app_settings)
     _authenticated_session(request, record)
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -140,31 +168,42 @@ def local_administrator_login(
 def authenticate_local_administrator(
     request: Request,
     session: Annotated[Session, Depends(get_db)],
+    app_settings: Annotated[Settings, Depends(settings)],
     password: Annotated[str, Form()],
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse | RedirectResponse:
     record = administrator(session)
     if record is None:
         return RedirectResponse("/auth/setup", status_code=status.HTTP_303_SEE_OTHER)
-    key = source_key(request.client.host if request.client else None)
-    if is_locked(record) or source_is_limited(session, key):
+    key = source_key(client_address(request, app_settings))
+    reservation = reserve_login_attempt(session, key)
+    if not reservation.allowed:
         return templates.TemplateResponse(
             request=request,
             name="local_auth_login.html",
-            context={
-                "error": "Sign-in is temporarily unavailable. Please wait 15 minutes and try again."
-            },
+            context={"error": "Too many sign-in attempts. Please wait and try again."},
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": str(reservation.retry_after_seconds)},
         )
-    if not verify_password(password, record.password_hash):
-        record_failure(session, record, key)
+    try:
+        with password_verification_slot():
+            verified = verify_password(password, record.password_hash)
+    except PasswordVerificationBusy:
+        return templates.TemplateResponse(
+            request=request,
+            name="local_auth_login.html",
+            context={"error": "Sign-in is busy. Please wait a moment and try again."},
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            headers={"Retry-After": "1"},
+        )
+    if not verified:
         return templates.TemplateResponse(
             request=request,
             name="local_auth_login.html",
             context={"error": "Incorrect password."},
             status_code=status.HTTP_401_UNAUTHORIZED,
         )
-    record_success(session, record)
+    record_success(session, record, key, password=password)
     _authenticated_session(request, record)
     return RedirectResponse("/", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -399,12 +438,21 @@ def change_local_administrator_password(
 
     record = session.get(LocalAdministrator, 1)
     error: str | None = None
-    if record is None or not verify_password(current_password, record.password_hash):
+    try:
+        with password_verification_slot():
+            current_password_valid = bool(
+                record and verify_password(current_password, record.password_hash)
+            )
+    except PasswordVerificationBusy:
+        current_password_valid = False
+        error = "Password verification is busy. Please wait a moment and try again."
+    if error is None and not current_password_valid:
         error = "Current password is incorrect."
-    elif new_password != password_confirmation:
+    if error is None and new_password != password_confirmation:
         error = "The new passwords do not match."
-    else:
+    if error is None:
         try:
+            assert record is not None
             change_password(session, record, new_password)
         except PasswordPolicyError as exc:
             error = str(exc)
@@ -436,9 +484,11 @@ def healthz() -> dict[str, str]:
     return {"status": "ok", "service": "open-playlist-sync"}
 
 
-@router.get("/auth/spotify/start", include_in_schema=False)
+@router.post("/auth/spotify/start", include_in_schema=False)
 def spotify_start(
-    request: Request, app_settings: Annotated[Settings, Depends(settings)]
+    request: Request,
+    app_settings: Annotated[Settings, Depends(settings)],
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     if not all(
         (
@@ -455,9 +505,11 @@ def spotify_start(
             redirect_uri=app_settings.spotify_redirect_uri,
         )
     )
-    authorization_url, state = service.authorization_url()
+    code_verifier, code_challenge = service.pkce_pair()
+    authorization_url, state = service.authorization_url(code_challenge=code_challenge)
     request.session["spotify_oauth_state"] = state
-    return RedirectResponse(authorization_url, status_code=status.HTTP_307_TEMPORARY_REDIRECT)
+    request.session["spotify_pkce_verifier"] = code_verifier
+    return RedirectResponse(authorization_url, status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.get("/auth/spotify/callback", include_in_schema=False)
@@ -475,7 +527,14 @@ def spotify_callback(
             f"/pairs?connection_error=spotify_{error}", status_code=status.HTTP_303_SEE_OTHER
         )
     expected_state = request.session.pop("spotify_oauth_state", None)
-    if not code or not expected_state or state != expected_state:
+    code_verifier = request.session.pop("spotify_pkce_verifier", None)
+    if (
+        not code
+        or not state
+        or not expected_state
+        or not code_verifier
+        or not secrets.compare_digest(state, expected_state)
+    ):
         raise HTTPException(status_code=400, detail="invalid Spotify OAuth state")
     if not all(
         (
@@ -492,7 +551,7 @@ def spotify_callback(
             redirect_uri=app_settings.spotify_redirect_uri,
         )
     )
-    token = service.exchange_code(code)
+    token = service.exchange_code(code, code_verifier=code_verifier)
     token["expires_at"] = (
         datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
     ).isoformat()
@@ -500,18 +559,32 @@ def spotify_callback(
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
     )
+    connected_other = session.scalar(
+        select(ProviderAccount).where(
+            ProviderAccount.provider_name == "spotify",
+            ProviderAccount.credentials_ciphertext.is_not(None),
+            ProviderAccount.external_account_id != profile["id"],
+        )
+    )
+    if connected_other is not None:
+        return RedirectResponse(
+            "/pairs?connection_error=spotify_account_change",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
     account = account_repo.get_by_external_id("spotify", profile["id"])
     if account is None:
         account = ProviderAccount(provider_name="spotify", external_account_id=profile["id"])
+    account.display_name = str(profile.get("display_name") or profile["id"])
     account_repo.save_credentials(account, token)
     session.commit()
     return RedirectResponse("/pairs?connected=spotify", status_code=status.HTTP_303_SEE_OTHER)
 
 
-@router.get("/auth/youtube_music/start", response_class=HTMLResponse, include_in_schema=False)
+@router.post("/auth/youtube_music/start", response_class=HTMLResponse, include_in_schema=False)
 def youtube_music_start(
     request: Request,
     app_settings: Annotated[Settings, Depends(settings)],
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse:
     if not all(
         (
@@ -534,11 +607,12 @@ def youtube_music_start(
     )
 
 
-@router.get("/auth/youtube_music/complete", include_in_schema=False)
+@router.post("/auth/youtube_music/complete", include_in_schema=False)
 def youtube_music_complete(
     request: Request,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     device_code = request.session.pop("ytmusic_device_code", None)
     if not device_code:
@@ -557,7 +631,12 @@ def youtube_music_complete(
         app_settings.ytmusic_client_id,
         app_settings.ytmusic_client_secret,
     )
-    token = service.exchange_device_code(device_code)
+    try:
+        token = service.exchange_device_code(device_code)
+    except YouTubeMusicOAuthError:
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music", status_code=status.HTTP_303_SEE_OTHER
+        )
     if not token.get("access_token"):
         return RedirectResponse(
             "/pairs?connection_error=youtube_music", status_code=status.HTTP_303_SEE_OTHER
@@ -565,12 +644,49 @@ def youtube_music_complete(
     token["expires_at"] = (
         datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
     ).isoformat()
+    identity = YouTubeMusicProvider(access_token=str(token["access_token"]))
+    try:
+        external_account_id, display_name = identity.account_identity()
+    except ProviderError:
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music_identity",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
     )
-    account = account_repo.get_by_external_id("youtube_music", "default")
+    connected_other = session.scalar(
+        select(ProviderAccount).where(
+            ProviderAccount.provider_name == "youtube_music",
+            ProviderAccount.credentials_ciphertext.is_not(None),
+            ProviderAccount.external_account_id.not_in((external_account_id, "default")),
+        )
+    )
+    if connected_other is not None:
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music_account_change",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    account = account_repo.get_by_external_id("youtube_music", external_account_id)
     if account is None:
-        account = ProviderAccount(provider_name="youtube_music", external_account_id="default")
+        account = account_repo.get_by_external_id("youtube_music", "default")
+    if account is None:
+        account = ProviderAccount(
+            provider_name="youtube_music",
+            external_account_id=external_account_id,
+            display_name=display_name,
+        )
+    elif account.external_account_id == "default":
+        account.external_account_id = external_account_id
+        session.execute(
+            update(SyncPair)
+            .where(
+                (SyncPair.source_account_id == account.id)
+                | (SyncPair.target_account_id == account.id)
+            )
+            .values(enabled=False)
+        )
+    account.display_name = display_name
     account_repo.save_credentials(account, token)
     session.commit()
     return RedirectResponse("/pairs?connected=youtube_music", status_code=status.HTTP_303_SEE_OTHER)
@@ -872,6 +988,7 @@ def delete_pair(
     session.execute(delete(SyncAction).where(SyncAction.run_id.in_(run_ids)))
     session.execute(delete(SyncRun).where(SyncRun.id.in_(run_ids)))
     session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == pair.id))
+    session.execute(delete(ProviderTrackMapping).where(ProviderTrackMapping.pair_id == pair.id))
     session.delete(pair)
     session.commit()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
@@ -887,16 +1004,25 @@ def disconnect_provider(
     session: Annotated[Session, Depends(get_db)],
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
-    account = session.scalar(
-        select(ProviderAccount)
-        .where(ProviderAccount.provider_name == provider_name)
-        .order_by(ProviderAccount.updated_at.desc(), ProviderAccount.id.desc())
-        .limit(1)
+    accounts = list(
+        session.scalars(
+            select(ProviderAccount).where(ProviderAccount.provider_name == provider_name)
+        )
     )
-    if account is None:
+    if not accounts:
         raise HTTPException(status_code=404, detail="provider account not found")
-    account.credentials_ciphertext = None
-    account.credential_key_id = None
+    account_ids = [account.id for account in accounts]
+    for account in accounts:
+        account.credentials_ciphertext = None
+        account.credential_key_id = None
+    session.execute(
+        update(SyncPair)
+        .where(
+            (SyncPair.source_account_id.in_(account_ids))
+            | (SyncPair.target_account_id.in_(account_ids))
+        )
+        .values(enabled=False)
+    )
     session.commit()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -907,27 +1033,56 @@ def sync_plan(
     pair_id: int,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
+    review_id: int | None = None,
 ) -> HTMLResponse:
     pair = SyncPairRepository(session).get(pair_id)
     if pair is None:
         raise HTTPException(status_code=404, detail="sync pair not found")
     try:
-        plan = SyncCoordinator(session, app_settings, create_provider).preview(pair)
-        unresolved_tracks = SyncCoordinator(
-            session, app_settings, create_provider
-        ).unresolved_actions(pair, plan)
-    except (ValueError, CredentialEncryptionError, ProviderError) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+        review = SyncCoordinator(session, app_settings, create_provider).load_review(
+            pair, review_id
+        )
+    except ReviewNotApplicable as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    plan = review.plan if review else None
+    token = request.session.get(f"sync_review_token:{review.review_id}", "") if review else ""
     return templates.TemplateResponse(
         request=request,
         name="sync_plan.html",
         context={
             "pair": pair,
             "plan": plan,
-            "fingerprint": plan_fingerprint(plan),
-            "error": None,
-            "unresolved_tracks": unresolved_tracks,
+            "review": review,
+            "fingerprint": plan_fingerprint(plan) if plan else "",
+            "approval_token": token,
+            "error": None if review else "Create a review to check both playlists.",
+            "unresolved_tracks": review.unresolved_actions if review else (),
         },
+    )
+
+
+@router.post("/sync/plan/{pair_id}", response_class=RedirectResponse, include_in_schema=False)
+def create_sync_review(
+    request: Request,
+    pair_id: int,
+    app_settings: Annotated[Settings, Depends(settings)],
+    session: Annotated[Session, Depends(get_db)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    try:
+        review = SyncCoordinator(session, app_settings, create_provider).prepare_review(pair)
+    except (ValueError, CredentialEncryptionError, ProviderError, PairOperationBusy) as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    for key in tuple(request.session):
+        if str(key).startswith("sync_review_token:"):
+            request.session.pop(key, None)
+    request.session[f"sync_review_token:{review.review_id}"] = review.approval_token
+    return RedirectResponse(
+        f"/sync/plan/{pair_id}?review_id={review.review_id}",
+        status_code=status.HTTP_303_SEE_OTHER,
     )
 
 
@@ -945,7 +1100,7 @@ def establish_sync_baseline(
         SyncCoordinator(session, app_settings, create_provider).accept_current_state(pair)
     except (ValueError, CredentialEncryptionError, ProviderError) as exc:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
-    return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
 
 @router.post("/sync/apply/{pair_id}", response_class=HTMLResponse, include_in_schema=False)
@@ -956,41 +1111,63 @@ def apply_sync_plan(
     session: Annotated[Session, Depends(get_db)],
     confirmation: Annotated[str, Form()] = "",
     fingerprint: Annotated[str, Form()] = "",
+    review_id: Annotated[int | None, Form()] = None,
+    approval_token: Annotated[str, Form()] = "",
     skip_unresolved: Annotated[str | None, Form()] = None,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse:
     pair = SyncPairRepository(session).get(pair_id)
     if pair is None:
         raise HTTPException(status_code=404, detail="sync pair not found")
+    review = None
     plan = None
     error = None
     try:
         coordinator = SyncCoordinator(session, app_settings, create_provider)
-        plan = coordinator.preview(pair)
+        if review_id is None:
+            raise ReviewNotApplicable("create a fresh review before applying changes")
+        review = coordinator.load_review(pair, review_id)
+        if review is None:
+            raise ReviewNotApplicable("the selected review is no longer available")
+        plan = review.plan
         coordinator.apply(
             pair,
             plan,
-            Approval(plan_fingerprint=fingerprint, confirmation=confirmation),
+            Approval(
+                plan_fingerprint=fingerprint,
+                confirmation=confirmation,
+                review_id=review_id,
+                token=approval_token,
+            ),
             skip_unresolved=skip_unresolved is not None,
         )
     except (
         ValueError,
         CredentialEncryptionError,
         DestructiveActionApprovalError,
+        ReviewExpired,
+        ReviewNotApplicable,
+        PairOperationBusy,
+        AmbiguousSpotifyRemoval,
+        TrackMappingConflict,
         PlanExecutionError,
         ProviderError,
     ) as exc:
         error = str(exc)
+    if review_id is not None:
+        request.session.pop(f"sync_review_token:{review_id}", None)
     if error is None:
-        return RedirectResponse(f"/sync/plan/{pair_id}", status_code=status.HTTP_303_SEE_OTHER)
+        return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
     return templates.TemplateResponse(
         request=request,
         name="sync_plan.html",
         context={
             "pair": pair,
             "plan": plan,
+            "review": review,
             "fingerprint": fingerprint,
+            "approval_token": "",
             "error": error,
-            "unresolved_tracks": (),
+            "unresolved_tracks": review.unresolved_actions if review else (),
         },
     )

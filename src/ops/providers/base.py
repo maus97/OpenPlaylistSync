@@ -56,12 +56,18 @@ class MusicProvider(Protocol):
 
         ...
 
-    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> str | None:
         """Add tracks to a playlist."""
 
         ...
 
-    def remove_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> None:
+    def remove_tracks(
+        self,
+        playlist_id: str,
+        tracks: Sequence[ProviderTrack],
+        *,
+        snapshot_id: str | None = None,
+    ) -> str | None:
         """Remove tracks only after explicit destructive-action approval."""
 
         ...

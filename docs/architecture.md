@@ -38,7 +38,8 @@ of done for the work beyond this milestone.
 
 ```mermaid
 flowchart TD
-    browser["Browser"] --> web["FastAPI + Jinja2/HTMX"]
+    browser["Authenticated operator browser"] --> web["FastAPI + Jinja2"]
+    bootstrap["One-time setup token"] --> web
     web --> app["Application services"]
     scheduler["APScheduler"] --> app
     app --> sync["Provider-neutral sync engine"]
@@ -48,7 +49,7 @@ flowchart TD
     provider --> youtube["YouTube Music adapter"]
     app --> storage["SQLAlchemy repositories"]
     storage --> sqlite["SQLite"]
-    secrets["Local encryption key"] --> credential["Credential encryption boundary"]
+    secrets["Separate secret volume"] --> credential["Credential encryption boundary"]
     credential --> storage
 ```
 
@@ -56,6 +57,11 @@ flowchart TD
 
 HTTP routes, request/response schemas, and dependency wiring. The API layer
 must not contain provider-specific reconciliation rules.
+
+Every browser route except the health check and local sign-in/setup boundary is
+protected by the single-operator session middleware. First-run password creation
+requires a high-entropy setup token retrieved out of band from the container or
+host terminal. State-changing browser actions use session-bound CSRF tokens.
 
 The `/settings` route is the operator configuration boundary. It never renders
 saved client secrets and persists submitted values through the encrypted
@@ -75,10 +81,12 @@ types. HTTP clients and authentication details stay here. The adapter boundary
 must accept injected clients or transport fakes.
 
 The current milestone contains operator-assisted authentication boundaries,
-read operations, and write operations for Spotify and YouTube Music. Writes are
-only reachable through the safety executor, which preflights the complete plan,
-rejects conflicts and stale fingerprints, and requires an explicit phrase for
-destructive actions.
+read operations, and write operations for Spotify and YouTube Music. A review is
+initiated by a CSRF-protected POST, bounded in size/provider lookups, and
+persisted with the complete ordered source and target state hashes. Apply
+consumes a short-lived one-time approval, re-fetches both playlists, rejects
+state drift, and holds a database-backed per-pair lease. Destructive actions
+additionally require an explicit confirmation phrase.
 
 Snapshots preserve playlist occurrences rather than collapsing duplicate songs.
 Spotify positions and YouTube Music playlist-item IDs remain attached to an
@@ -88,10 +96,12 @@ target-led, or accept-as-is. The first three modes add only; no initial policy
 can infer a deletion.
 
 When OPS successfully adds a resolved track to the other provider, it stores
-that destination provider ID with the source's canonical sync key in
-`provider_track_mappings`. Later snapshots apply that verified mapping before
-three-way reconciliation. This keeps an item linked even when Spotify and
-YouTube Music display it with different titles.
+that destination provider ID with the source's canonical sync key and the pair
+that established the evidence in `provider_track_mappings`. Later snapshots for
+that pair apply the verified mapping before three-way reconciliation. Identity
+rules are versioned; an older baseline must be explicitly re-established before
+new rules can produce writes. This prevents cross-pair cache poisoning and
+unsafe deletions during identity migrations.
 
 ### `src/ops/sync/`
 
@@ -177,11 +187,14 @@ visible for review; OPS never advances the baseline for that run.
 The initial migration establishes these conceptual records:
 
 - `app_configuration`: encrypted operator settings and scheduler preferences;
-- `provider_accounts`: provider identity plus encrypted credential ciphertext;
+- `provider_accounts`: stable provider identity, display label, and encrypted credential
+  ciphertext;
 - `sync_pairs`: the two provider accounts and playlist IDs being synchronized;
-- `sync_baselines`: the last successful normalized snapshot for a pair and
-  playlist;
-- `sync_runs`: status, timestamps, and a diagnostic summary for each attempt.
+- `provider_track_mappings`: pair-scoped, provenance-labelled identity evidence;
+- `sync_baselines`: the last successful normalized snapshot and identity version;
+- `sync_runs`: status, exact reviewed plan/state hashes, one-time approval state,
+  timestamps, and a diagnostic summary for each attempt;
+- `sync_actions`: a durable per-operation journal for recovery and review.
 
 The JSON snapshot columns are intentionally a staging choice. Before the first
 production release, evaluate whether large playlists need normalized child
@@ -198,8 +211,11 @@ to reconstruct the previous successful baseline.
 - The credential service encrypts provider tokens before SQLAlchemy persistence
   and decrypts only inside the provider adapter boundary.
 - If deployment does not provide secrets, OPS generates a session secret and a
-  Fernet key in the persistent data directory on first start. The key is kept
-  outside the database so database ciphertext cannot decrypt itself.
+  Fernet key in the separate persistent secret directory on first start. A
+  legacy same-volume key is copied for a non-destructive migration and should be
+  removed after the upgraded deployment is verified and backed up.
+- SQLite connections enable foreign-key enforcement and private file permissions
+  are applied where the host supports POSIX modes.
 - The service has no telemetry endpoint, analytics dependency, or outbound
   call except provider operations initiated by the operator.
 - Destructive operations need a dry-run plan, explicit confirmation, and a
@@ -208,8 +224,12 @@ to reconstruct the previous successful baseline.
 ## Deployment
 
 Docker is the primary packaging target. The container runs as a non-root user,
-stores SQLite data on `/data`, and exposes only the FastAPI HTTP port. Compose
-provides a portable local deployment shape using a named volume.
+stores SQLite data on `/data`, stores runtime keys on a distinct secret volume,
+and binds its HTTP port to loopback by default. The production Compose profile
+drops Linux capabilities, prevents privilege escalation, uses a read-only root
+filesystem with a temporary `/tmp`, and applies process/resource limits. Remote
+access uses an operator-managed HTTPS reverse proxy and explicit host/proxy
+allowlists.
 
 ## Testing strategy
 
@@ -227,15 +247,16 @@ provides a portable local deployment shape using a named volume.
 1. **Credential key rotation and recovery:** Fernet authenticated encryption is
    implemented for the current milestone; define key rotation, recovery, and
    behavior when the key is unavailable.
-2. **OAuth callback and session model:** decide how a self-hosted instance
-   safely handles callback URLs, browser sessions, token refresh, and optional
-   remote access without exposing secrets in logs.
+2. **HTTPS ownership:** OPS enforces secure cookies and HSTS when configured for
+   production, but certificate issuance and reverse-proxy policy remain an
+   operator deployment responsibility.
 3. **Track identity and matching policy:** define exact-match fields, fuzzy
    matching thresholds, manual resolution, and behavior for unavailable tracks.
 4. **Conflict policy:** decide whether conflicts pause a run, create a review
    queue, or allow a per-playlist preference.
-5. **Destructive-action confirmation:** define the operator UI, expiry window,
-   version check, and audit record for approved deletions.
+5. **Spotify duplicate deletion:** the current Spotify API cannot target a
+   reviewed duplicate occurrence by position; OPS refuses ambiguous duplicate
+   removals and asks the operator to resolve the occurrence manually.
 6. **Baseline storage scale:** validate JSON snapshots with realistic playlist
    sizes before committing to normalized tables or a hybrid schema.
 7. **Scheduler behavior:** the lifecycle and single-instance preview tick are

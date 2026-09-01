@@ -20,7 +20,12 @@ def require_csrf(request: Request, csrf_token: Annotated[str | None, Form()] = N
     """Reject state-changing form posts without the current session token."""
 
     expected = request.session.get("csrf_token")
-    if not expected or not secrets.compare_digest(expected, csrf_token):
+    if (
+        not expected
+        or not csrf_token
+        or len(csrf_token) > 512
+        or not secrets.compare_digest(expected, csrf_token)
+    ):
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN, detail="invalid form security token"
         )

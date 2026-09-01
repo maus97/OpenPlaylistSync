@@ -4,7 +4,7 @@ from collections.abc import Mapping
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ops.models import (
@@ -154,6 +154,57 @@ class SyncRunRepository:
             select(SyncRun).order_by(SyncRun.started_at.desc(), SyncRun.id.desc()).limit(limit)
         )
         return list(self.session.scalars(statement))
+
+    def get(self, run_id: int) -> SyncRun | None:
+        return self.session.get(SyncRun, run_id)
+
+    def latest_for_pair(self, pair_id: int) -> SyncRun | None:
+        statement = (
+            select(SyncRun)
+            .where(SyncRun.pair_id == pair_id)
+            .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def latest_open_review(self, pair_id: int) -> SyncRun | None:
+        statement = (
+            select(SyncRun)
+            .where(
+                SyncRun.pair_id == pair_id,
+                SyncRun.status.in_(("planned", "conflict", "baseline_upgrade")),
+                SyncRun.approval_consumed_at.is_(None),
+                SyncRun.plan_json.is_not(None),
+            )
+            .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+            .limit(1)
+        )
+        return self.session.scalar(statement)
+
+    def prune_previews(self, pair_id: int, keep: int = 50) -> int:
+        stale_ids = list(
+            self.session.scalars(
+                select(SyncRun.id)
+                .where(
+                    SyncRun.pair_id == pair_id,
+                    SyncRun.status.in_(
+                        (
+                            "planned",
+                            "conflict",
+                            "baseline_upgrade",
+                            "expired",
+                            "review_failed",
+                        )
+                    ),
+                )
+                .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
+                .offset(keep)
+            )
+        )
+        if not stale_ids:
+            return 0
+        result = self.session.execute(delete(SyncRun).where(SyncRun.id.in_(stale_ids)))
+        return result.rowcount or 0
 
     def finish(self, run: SyncRun, status: str, summary_json: str | None = None) -> SyncRun:
         run.status = status

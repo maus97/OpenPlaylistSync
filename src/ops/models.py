@@ -17,6 +17,7 @@ class ProviderAccount(Base):
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
     external_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     credentials_ciphertext: Mapped[str | None] = mapped_column(Text, nullable=True)
     credential_key_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
@@ -87,6 +88,10 @@ class SyncPair(Base):
     target_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
     initial_sync_policy: Mapped[str] = mapped_column(String(32), default="merge", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    operation_lock_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    operation_lock_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
@@ -97,12 +102,15 @@ class ProviderTrackMapping(Base):
     """A verified provider track ID mapped to OPS's canonical sync key."""
 
     __tablename__ = "provider_track_mappings"
-    __table_args__ = (UniqueConstraint("account_id", "provider_track_id"),)
+    __table_args__ = (UniqueConstraint("pair_id", "account_id", "provider_track_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    pair_id: Mapped[int] = mapped_column(ForeignKey("sync_pairs.id"), nullable=False)
     account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), nullable=False)
     provider_track_id: Mapped[str] = mapped_column(String(255), nullable=False)
     canonical_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    provenance: Mapped[str] = mapped_column(String(32), nullable=False, default="successful_add")
+    identity_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
@@ -120,6 +128,7 @@ class SyncBaseline(Base):
     source_provider: Mapped[str] = mapped_column(String(64), nullable=False)
     target_provider: Mapped[str] = mapped_column(String(64), nullable=False)
     snapshot_json: Mapped[str] = mapped_column(Text, nullable=False)
+    identity_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
     synchronized_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -134,6 +143,17 @@ class SyncRun(Base):
     plan_fingerprint: Mapped[str | None] = mapped_column(String(1024), nullable=True)
     status: Mapped[str] = mapped_column(String(32), nullable=False)
     summary_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    plan_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    resolution_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    source_state_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    target_state_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_token_hash: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    approval_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    approval_consumed_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     completed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
 

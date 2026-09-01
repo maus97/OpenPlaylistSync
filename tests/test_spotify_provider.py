@@ -1,7 +1,7 @@
 import httpx
 import pytest
 
-from ops.providers.base import AuthorizationRequired
+from ops.providers.base import AuthorizationRequired, ProviderUnavailable
 from ops.providers.spotify import SpotifyProvider
 from ops.providers.types import ProviderTrack
 
@@ -156,6 +156,31 @@ def test_spotify_provider_follows_playlist_pages() -> None:
     )
 
     assert [playlist.name for playlist in provider.list_playlists()] == ["First", "Second"]
+
+
+def test_spotify_provider_rejects_untrusted_pagination_url_before_sending_token() -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            json={
+                "items": [{"id": "playlist-1", "name": "First"}],
+                "next": "https://attacker.invalid/collect",
+            },
+        )
+
+    provider = SpotifyProvider(
+        access_token="sensitive-token",
+        client=httpx.Client(
+            base_url="https://api.spotify.com/v1", transport=httpx.MockTransport(handler)
+        ),
+    )
+
+    with pytest.raises(ProviderUnavailable, match="pagination URL"):
+        provider.list_playlists()
+    assert [request.url.host for request in requests] == ["api.spotify.com"]
 
 
 def test_spotify_provider_matches_topic_channel_metadata_from_youtube() -> None:

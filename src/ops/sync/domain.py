@@ -1,5 +1,6 @@
 """Pure, occurrence-aware synchronization domain and reconciliation rules."""
 
+import hashlib
 import re
 import unicodedata
 from collections import Counter, defaultdict
@@ -9,11 +10,22 @@ from enum import StrEnum
 
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
+TRACK_IDENTITY_VERSION = 2
 
-def _normalize_text(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value)
-    ascii_text = normalized.encode("ascii", "ignore").decode("ascii")
-    return re.sub(r"\s+", " ", ascii_text.casefold()).strip()
+
+def normalize_text(value: str) -> str:
+    """Normalize human metadata without discarding non-Latin scripts or symbols."""
+
+    decomposed = unicodedata.normalize("NFKD", value)
+    without_marks = "".join(
+        character for character in decomposed if unicodedata.category(character) != "Mn"
+    )
+    folded = unicodedata.normalize("NFKC", without_marks).casefold()
+    normalized = "".join(
+        character if unicodedata.category(character)[0] in {"L", "N", "S"} else " "
+        for character in folded
+    )
+    return re.sub(r"\s+", " ", normalized).strip()
 
 
 def track_key(track: ProviderTrack) -> str:
@@ -24,8 +36,12 @@ def track_key(track: ProviderTrack) -> str:
     evidence and used to detect incompatible metadata edits.
     """
 
-    artists = ",".join(_normalize_text(artist) for artist in track.artists)
-    return f"text:{_normalize_text(track.title)}|{artists}"
+    title = normalize_text(track.title)
+    artists = ",".join(normalize_text(artist) for artist in track.artists)
+    if not title and not artists:
+        fallback = hashlib.sha256(track.provider_track_id.encode("utf-8")).hexdigest()
+        return f"opaque:{fallback}"
+    return f"text:{title}|{artists}"
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,6 +79,7 @@ class PlaylistState:
     playlist_id: str
     name: str
     tracks: tuple[TrackState, ...]
+    snapshot_id: str | None = None
 
     @classmethod
     def from_provider_playlist(cls, playlist: ProviderPlaylist) -> "PlaylistState":
@@ -73,6 +90,7 @@ class PlaylistState:
             playlist_id=playlist.provider_playlist_id,
             name=playlist.name,
             tracks=tuple(TrackState.from_provider_track(track) for track in playlist.tracks),
+            snapshot_id=playlist.snapshot_id,
         )
 
     def by_key(self) -> dict[str, TrackState]:
@@ -179,7 +197,7 @@ def _metadata_conflict_keys(
     """Detect conflicting edits to one shared ISRC even if title text changed."""
 
     def by_isrc(playlist: PlaylistState) -> dict[str, TrackState]:
-        return {_normalize_text(track.isrc): track for track in playlist.tracks if track.isrc}
+        return {normalize_text(track.isrc): track for track in playlist.tracks if track.isrc}
 
     baseline_source = by_isrc(baseline.source)
     baseline_target = by_isrc(baseline.target)

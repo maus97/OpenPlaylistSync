@@ -6,6 +6,7 @@
     <meta name="theme-color" content="#121212">
     <title>{% block title %}Open Playlist Sync{% endblock %} · OPS</title>
     <link rel="stylesheet" href="/static/style.css">
+    <script src="/static/app.js" defer></script>
   </head>
   <body>
     <div class="page-loading" id="page-loading" hidden role="status" aria-live="polite">
@@ -26,17 +27,5 @@
       <main class="page-shell">{% block content %}{% endblock %}</main>
       <footer class="footer"><span>OPS · private and local</span><span><a href="/about">About</a> · <a href="/healthz">System health</a></span></footer>
     </div>
-    <script>
-      document.addEventListener("click", (event) => {
-        const link = event.target.closest("a[data-loading-message]");
-        if (!link || event.defaultPrevented || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-        const overlay = document.getElementById("page-loading");
-        const message = document.getElementById("page-loading-message");
-        if (!overlay || !message) return;
-        message.textContent = link.dataset.loadingMessage;
-        overlay.hidden = false;
-        document.body.setAttribute("aria-busy", "true");
-      });
-    </script>
   </body>
 </html>
