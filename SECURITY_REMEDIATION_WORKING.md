@@ -57,7 +57,7 @@ Remediation and local validation are complete. Final report created. The remaini
 - Docker Scout and Trivy 0.74.0 — **0 Critical / 0 High** after installing the patched OpenSSL/libssl packages.
 - Actionlint — **passed**.
 - GitHub Actions run `33459963121` for `eca9e00` — **quality, secrets, and container jobs all passed**.
-- Added a GUI HTTPS-mode switch after the initial remediation run. It persists encrypted, applies Secure cookies and HSTS after restart, and can be locked or recovered with `OPS_SESSION_COOKIE_SECURE`. Full local gates remain green; the follow-up GitHub run is pending push.
+- Added a GUI HTTPS-mode switch after the initial remediation run. It persists encrypted, applies Secure cookies and HSTS after restart, and can be locked or recovered with `OPS_SESSION_COOKIE_SECURE`. GitHub Actions run `33484984209` for `3e36167` passed its quality, secrets, and container jobs.
 
 ## Final finding statuses
 

@@ -216,6 +216,8 @@ manual administrative actions.
 - Actionlint: **passed** for the hardened GitHub workflow.
 - GitHub Actions run `33459963121` for commit `eca9e00`: **quality,
   secrets, and container jobs all passed**.
+- GitHub Actions run `33484984209` for the HTTPS-mode follow-up commit
+  `3e36167`: **quality, secrets, and container jobs all passed**.
 
 Tests use mocked or disposable providers and storage. No real playlist was
 created, changed, or deleted.
