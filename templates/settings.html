@@ -36,7 +36,7 @@
 
     <article class="card">
       <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2><a class="provider-title" href="/setup/youtube_music">YouTube Music <span aria-hidden="true">↗</span></a></h2><p>Google Cloud Console</p></div></div>
-      <p class="provider-brief">Enable YouTube Data API v3, create a TVs and Limited Input devices OAuth client, then paste its ID and secret.</p>
+      <p class="provider-brief">Create a TVs and Limited Input devices OAuth client, then paste its ID and secret.</p>
       <label>Google OAuth client ID
         <input name="ytmusic_client_id" value="{{ ytmusic_client_id }}" autocomplete="off" placeholder="Paste Google OAuth client ID">
       </label>
@@ -44,7 +44,7 @@
         <input type="password" name="ytmusic_client_secret" autocomplete="new-password" placeholder="Leave blank to keep the saved secret">
       </label>
       <label class="checkbox-label"><input type="checkbox" name="clear_ytmusic_secret" value="1"> Clear saved YouTube Music secret</label>
-      <p class="field-help">Enable YouTube Data API v3 before connecting.</p>
+      <p class="field-help">OPS uses the YouTube Music catalogue through ytmusicapi; it does not use YouTube Data API v3 playlist or search calls.</p>
     </article>
   </section>
 

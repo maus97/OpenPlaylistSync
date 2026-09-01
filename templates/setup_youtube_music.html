@@ -36,15 +36,6 @@
 
   <div class="guide-step">
     <div class="guide-number guide-number-pink">3</div>
-    <h2>Enable the YouTube API</h2>
-    <ol class="setup-list">
-      <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube Data API v3 ↗</a> in the same project.</li>
-      <li>Choose <strong>Enable</strong>. If Google asks you to enable billing or accept terms, follow that prompt for the project.</li>
-    </ol>
-  </div>
-
-  <div class="guide-step">
-    <div class="guide-number guide-number-pink">4</div>
     <h2>Create the OAuth client</h2>
     <ol class="setup-list">
       <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Credentials ↗</a>, or choose <strong>Google Auth Platform → Clients</strong> in the newer console.</li>
@@ -55,15 +46,20 @@
   </div>
 
   <div class="guide-step">
-    <div class="guide-number guide-number-pink">5</div>
+    <div class="guide-number guide-number-pink">4</div>
     <h2>Approve YouTube Music in OPS</h2>
     <ol class="setup-list">
       <li>Open <a class="text-link" href="/pairs">Playlists</a> and choose <strong>Connect YouTube Music</strong>.</li>
       <li>OPS will show a Google verification URL and one-time code. Open the URL on a device with a browser, enter the code, select the same Google account, and approve the YouTube permission.</li>
       <li>Return to OPS and choose <strong>I completed authorization</strong>. OPS will then load your playlists.</li>
     </ol>
-    <p class="field-help">OPS requests <code>https://www.googleapis.com/auth/youtube.force-ssl</code> so it can read, create, add to, and remove items from your playlists. It never receives your Google password.</p>
+    <p class="field-help">OPS requests <code>https://www.googleapis.com/auth/youtube</code> for its encrypted device authorization. It uses <code>ytmusicapi</code> for YouTube Music catalogue and playlist operations, not YouTube Data API v3. It never receives your Google password.</p>
   </div>
+</section>
+
+<section class="card guide-page">
+  <h2>Important compatibility note</h2>
+  <p class="muted-copy">ytmusicapi uses YouTube Music's unofficial internal interface. It gives OPS song-focused matching and avoids Data API quota for playlist work, but a YouTube change can require an OPS update or a new connection. Do not create a Google API key for OPS.</p>
 </section>
 
 <div class="hero-actions"><a class="button primary" href="/settings">Back to Settings</a><a class="button ghost" href="/setup/spotify">Spotify guide</a></div>

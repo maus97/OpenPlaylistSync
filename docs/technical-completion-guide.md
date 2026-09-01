@@ -60,7 +60,7 @@ workflow without a command line:
 | --- | --- | --- | --- |
 | P0 | Cross-provider track identity | Verified destination IDs are now saved with their source canonical key after a successful add | Add confidence thresholds and a manual candidate picker for ambiguous matches |
 | P0 | First synchronization | The current baseline action accepts two potentially different playlists without converging them | The operator selects merge-only, Spotify-authoritative, YouTube-authoritative, or accept-as-is; the preview is explicit and the default never deletes |
-| P0 | YouTube Music removal | The official API identifies each occurrence with a playlist-item ID | Snapshots retain playlist-item IDs and deletion tests prove the correct duplicate occurrence is removed |
+| P0 | YouTube Music removal | ytmusicapi identifies each occurrence with `videoId` and `setVideoId` | Snapshots retain `setVideoId` values and deletion tests prove the correct duplicate occurrence is removed |
 | P0 | Spotify token lifecycle | Tokens refresh before expiry and rotated credentials are saved; catalogue search also requires `user-read-private` scope | Add an account-health indicator and proactive reconnect warning |
 | P0 | Pagination and duplicates | Provider reads can stop at the first page and the domain collapses duplicate tracks into a dictionary | All pages are read, occurrences remain distinct, and large/duplicate playlists have synthetic tests |
 | P0 | Durable execution | A later provider failure can leave earlier writes applied without a resumable action record | Every action is journaled, postconditions are checked, partial runs are recoverable, and the baseline advances only after verified convergence |
@@ -110,9 +110,9 @@ Add records equivalent to these concepts through an Alembic migration:
   rejected matches.
 
 An occurrence is not the same thing as a song. Two identical songs in one
-playlist must remain two occurrences. On YouTube Music, preserve the YouTube
-Data API playlist-item ID as the occurrence identifier because it is required
-to remove one exact playlist item.
+playlist must remain two occurrences. On YouTube Music, preserve ytmusicapi's
+`setVideoId` beside the `videoId` because both are required to remove one exact
+playlist item.
 
 ### Matching pipeline
 
@@ -187,17 +187,18 @@ allowlisting must also be explained in the GUI setup guide.
 
 ### YouTube Music
 
-1. Use the official YouTube Data API v3 for playlist discovery, item reads,
-   video metadata, search, creation, additions, and deletions.
-2. Store the `videoId` and playlist-item `id` for every occurrence; delete by
-   playlist-item ID and test duplicate removals explicitly.
-3. Follow all `nextPageToken` values for playlists and playlist items.
-4. Validate mutation responses rather than treating any returned object as
-   success.
-5. Keep HTTP clients injectable and test the provider with synthetic API
-   responses, including auth, quota, paging, and write failures.
-6. Refresh Google OAuth tokens before they expire and provide an in-GUI
-   reconnect flow when refresh fails.
+1. Keep ytmusicapi calls inside the provider adapter; use `filter="songs"` for
+   catalogue matching and an unauthenticated catalogue client where possible.
+2. Store `videoId` and `setVideoId` for every occurrence; delete by both values
+   and test duplicate removals explicitly.
+3. Use `get_library_playlists(limit=None)` and `get_playlist(limit=None)` so
+   the adapter requests complete library snapshots.
+4. Batch mutations, preserve duplicates intentionally, and never retry a write
+   merely because a response is uncertain.
+5. Keep ytmusicapi clients injectable and test synthetic responses for
+   authentication, rate limits, temporary failures, and malformed metadata.
+6. Refresh encrypted Google OAuth tokens before they expire and require a clean
+   reconnect for legacy official-API token records or failed refreshes.
 
 ### Shared provider behavior
 
@@ -407,9 +408,9 @@ phase:
   resume rules.
 - **ADR-006 — Deployment threat model:** local-only default, authentication,
   reverse proxy, TLS, and secret storage expectations.
-- **ADR-007 — YouTube Music integration boundary:** official YouTube Data API
-  coverage, quota policy, and the limitations of playlists visible through the
-  Google API.
+- **ADR-007 — YouTube Music integration boundary:** ytmusicapi compatibility,
+  OAuth token handling, request minimisation, and the risk that YouTube changes
+  its unofficial internal interface.
 - **ADR-008 — Persistence scale:** JSON snapshots versus normalized occurrence
   tables, retention, and expected playlist limits.
 
@@ -435,8 +436,8 @@ OPS can be described as fully working only when all of the following are true:
   or the service is explicitly restricted to local access.
 - [ ] Backup, clean-host restore, migration, rollback, and deployment procedures
   have all been demonstrated.
-- [ ] Release notes document known provider limitations and YouTube Data API
-  quota/visibility constraints.
+- [ ] Release notes document known provider limitations, ytmusicapi
+  compatibility, and the YouTube Music reconnect path.
 
 ## Primary technical references
 
@@ -449,5 +450,5 @@ OPS can be described as fully working only when all of the following are true:
 - [Spotify February 2026 migration guide](https://developer.spotify.com/documentation/web-api/tutorials/february-2026-migration-guide)
 - [Google OAuth 2.0 for TV and limited-input devices](https://developers.google.com/identity/protocols/oauth2/limited-input-device)
 - [Google YouTube authorization credentials](https://developers.google.com/youtube/registering_an_application)
-- [YouTube Data API v3 reference](https://developers.google.com/youtube/v3/docs)
+- [ytmusicapi documentation](https://ytmusicapi.readthedocs.io/)
 - [Docker volume backup and restore](https://docs.docker.com/engine/storage/volumes/)

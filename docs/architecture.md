@@ -46,7 +46,7 @@ flowchart TD
     sync --> reconcile["Three-way reconciliation"]
     sync --> provider["Provider interface"]
     provider --> spotify["Spotify adapter"]
-    provider --> youtube["YouTube Music adapter"]
+    provider --> youtube["YTMusicApiProvider / ytmusicapi"]
     app --> storage["SQLAlchemy repositories"]
     storage --> sqlite["SQLite"]
     secrets["Separate secret volume"] --> credential["Credential encryption boundary"]
@@ -80,28 +80,36 @@ provider-specific playlist and track representations into the neutral domain
 types. HTTP clients and authentication details stay here. The adapter boundary
 must accept injected clients or transport fakes.
 
-The current milestone contains operator-assisted authentication boundaries,
-read operations, and write operations for Spotify and YouTube Music. A review is
-initiated by a CSRF-protected POST, bounded in size/provider lookups, and
-persisted with the complete ordered source and target state hashes. Apply
-consumes a short-lived one-time approval, re-fetches both playlists, rejects
-state drift, and holds a database-backed per-pair lease. Destructive actions
-additionally require an explicit confirmation phrase.
+The YouTube Music adapter is `YTMusicApiProvider`. It isolates ytmusicapi and
+its unofficial YouTube Music transport behind the common provider contract.
+Catalogue song searches use a separate unauthenticated client; library reads
+and writes use ytmusicapi's OAuth token dictionary, loaded only from OPS's
+encrypted credential store. No ytmusicapi `oauth.json` file is created.
+
+A review is initiated by a CSRF-protected POST, bounded in size/provider
+lookups, and persisted with the complete ordered source and target state hashes.
+Apply consumes a short-lived one-time approval, re-fetches both playlists,
+rejects state drift, and holds a database-backed per-pair lease. Destructive
+actions additionally require an explicit confirmation phrase.
 
 Snapshots preserve playlist occurrences rather than collapsing duplicate songs.
-Spotify positions and YouTube Music playlist-item IDs remain attached to an
+Spotify positions and YouTube Music `setVideoId` values remain attached to an
 occurrence so a reviewed removal can target one exact provider item. Initial
 synchronization has an explicit persisted policy: merge, source-led,
 target-led, or accept-as-is. The first three modes add only; no initial policy
 can infer a deletion.
 
 When OPS successfully adds a resolved track to the other provider, it stores
-that destination provider ID with the source's canonical sync key and the pair
-that established the evidence in `provider_track_mappings`. Later snapshots for
-that pair apply the verified mapping before three-way reconciliation. Identity
-rules are versioned; an older baseline must be explicitly re-established before
-new rules can produce writes. This prevents cross-pair cache poisoning and
-unsafe deletions during identity migrations.
+that destination provider ID, source provider ID/ISRC, canonical sync key, and
+pair that established the evidence in `provider_track_mappings`. Later
+snapshots reuse direct source-ID mappings first, then ISRC and canonical
+metadata mappings. `provider_search_cache` stores bounded, per-account search
+evidence by a metadata fingerprint: 14 days for an automatic match and 12 hours
+for an unresolved result. A destination rejection invalidates the related
+mapping and cache entry before the next review. Identity rules are versioned;
+an older baseline must be explicitly re-established before new rules can
+produce writes. This prevents cross-pair cache poisoning and unsafe deletions
+during identity migrations.
 
 ### `src/ops/sync/`
 
@@ -145,7 +153,8 @@ playlist and track types:
 - create a playlist;
 - add tracks;
 - remove tracks;
-- rename or update playlist metadata.
+- rename or update playlist metadata;
+- reorder an exact playlist occurrence where the provider supports it.
 
 Provider IDs remain opaque strings. The synchronization engine must never infer
 that a Spotify ID and a YouTube Music ID are interchangeable. Track matching

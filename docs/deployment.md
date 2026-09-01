@@ -72,8 +72,9 @@ HTTPS mode.
 
 After the proxy is working, update Spotify's redirect address to the external
 HTTPS URL and reconnect Spotify from the OPS interface. Google device-code
-authorization does not use a callback address, but YouTube Data API v3 must be
-enabled in the selected Google Cloud project.
+authorization does not use a callback address. OPS uses ytmusicapi for YouTube
+Music operations, so it does not require a YouTube Data API key or make YouTube
+Data API v3 playlist/search calls.
 
 ## Backup and restore
 
@@ -109,9 +110,12 @@ applying a new sync.
 5. If the update fails, stop OPS, restore the volume backup, return to the
    previous image/source version, and start the service again.
 
-Migration `0009_security_remediation_state` changes synchronization approval,
-lease, identity, and mapping records. Roll back the application and database
-together; do not run an older image against a database left at revision `0009`.
+Migration `0011_ytmusicapi_migration` changes mapping evidence and adds a
+bounded provider-search cache. Roll back the application and database together;
+do not run an older image against a database left at revision
+`0011_ytmusicapi_migration`. Before upgrading a real deployment, back up both
+named volumes. Reconnect YouTube Music after the upgrade, then review the
+paused pairs and save a new baseline before applying any changes.
 
 Run only one OPS container against a SQLite data volume. Multiple replicas can
 produce concurrent writes and are not supported.

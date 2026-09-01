@@ -105,7 +105,7 @@ Implemented:
 - First-sync choices for merge, source-led, target-led, or accept-as-is setup;
   all initial convergence actions are additions only.
 - Occurrence-aware snapshots, provider paging, confidence-gated destination
-  searches, access-token refresh, and exact YouTube Music playlist-item removals.
+  searches, access-token refresh, and exact YouTube Music `setVideoId` removals.
 - Durable plan/action journal, CSRF-protected browser forms, and pair
   pause/delete/disconnect controls.
 - A simple browser UI for provider setup, account connections, playlist creation,
@@ -168,21 +168,29 @@ and [playlist scopes](https://developer.spotify.com/documentation/web-api/concep
 
 1. In [Google Cloud Console](https://console.cloud.google.com/projectcreate),
    create or select a project.
-2. Enable [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com).
-3. In [Credentials](https://console.cloud.google.com/apis/credentials), create
+2. In [Credentials](https://console.cloud.google.com/apis/credentials), create
    an OAuth client ID and choose **TVs and Limited Input devices**.
-4. Copy the client ID and secret into OPS Settings and save.
-5. Open Pairs and choose **Connect YouTube Music**. OPS will show a Google
+3. Copy the client ID and secret into OPS Settings and save.
+4. Open Pairs and choose **Connect YouTube Music**. OPS will show a Google
    verification URL and one-time code. Complete the approval, return to OPS,
    and choose **I completed authorization**.
 
-OPS uses the Google device-code approval flow with the narrower
-`https://www.googleapis.com/auth/youtube.force-ssl` read/write scope. Playlist discovery,
-matching, creation, additions, and removals use the official
-[YouTube Data API v3](https://developers.google.com/youtube/v3), rather than
-private YouTube Music endpoints. Google Cloud's
-[authorization credential guide](https://developers.google.com/youtube/registering_an_application)
-explains the OAuth credential types.
+OPS uses ytmusicapi's Google device-authorization flow with
+`https://www.googleapis.com/auth/youtube`. Playlist discovery, song matching,
+creation, additions, removals, and metadata updates go through the YouTube
+Music interface exposed by [ytmusicapi](https://ytmusicapi.readthedocs.io/),
+not YouTube Data API v3. A Google OAuth client is still required, but OPS does
+not need a YouTube Data API key or use Data API playlist/search quota.
+
+ytmusicapi uses an unofficial YouTube Music interface. It improves song-focused
+matching, but YouTube changes can require an OPS update or a new authorization.
+OPS stores the refreshable OAuth token only as encrypted application data; it
+does not create an `oauth.json` file. Existing YouTube Music connections from
+the former Data API adapter must be reconnected after this upgrade. When there
+is one legacy connection, OPS preserves its pair references, replaces the
+encrypted token, and pauses those pairs. Review the new provider view and save
+a fresh baseline before applying further changes. If you already disconnected
+multiple old YouTube accounts, create or repair their pairs manually.
 
 ## License
 
