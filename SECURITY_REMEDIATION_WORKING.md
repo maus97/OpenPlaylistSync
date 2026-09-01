@@ -56,6 +56,7 @@ Remediation and local validation are complete. Final report created. The remaini
 - Hardened image build and isolated runtime/HTTP boundary checks — **passed**.
 - Docker Scout and Trivy 0.74.0 — **0 Critical / 0 High** after installing the patched OpenSSL/libssl packages.
 - Actionlint — **passed**.
+- GitHub Actions run `33459963121` for `eca9e00` — **quality, secrets, and container jobs all passed**.
 
 ## Final finding statuses
 
@@ -95,6 +96,4 @@ Remediation and local validation are complete. Final report created. The remaini
 
 ## Remaining work
 
-- Commit and push the validated follow-up changes and final report.
-- Observe the GitHub CI run and correct any repository-runner-only failure.
 - Manual operator actions listed in `SECURITY_REMEDIATION_REPORT.md`; these are intentionally outside this local task.
