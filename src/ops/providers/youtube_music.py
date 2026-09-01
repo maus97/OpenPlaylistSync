@@ -12,6 +12,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from hashlib import sha256
 from typing import Any, Protocol, TypeVar
 
 import requests
@@ -502,14 +503,33 @@ class YTMusicApiProvider:
         )
 
     def account_identity(self) -> tuple[str, str]:
-        """Return the authenticated YouTube channel handle and display label."""
+        """Return a stable account identity and display label.
+
+        ``channelHandle`` is the strongest identifier exposed by ytmusicapi,
+        but YouTube does not return one for every account. In that case use a
+        privacy-preserving digest of the account name and avatar URL rather
+        than rejecting an otherwise valid connection or storing profile data as
+        the account key. If either fallback field is absent, fail closed so an
+        account can never be confused with another account.
+        """
 
         payload = self._call(lambda: self._library().get_account_info(), retry_read=True)
         handle = payload.get("channelHandle")
         if not isinstance(handle, str) or not handle.strip():
-            raise AuthorizationRequired(
-                "YouTube Music did not provide a channel handle; set one and reconnect the account"
+            account_name = payload.get("accountName")
+            photo_url = payload.get("accountPhotoUrl")
+            if not isinstance(account_name, str) or not account_name.strip():
+                raise AuthorizationRequired("YouTube Music did not provide an account identity")
+            if not isinstance(photo_url, str) or not photo_url.strip():
+                raise AuthorizationRequired("YouTube Music did not provide an account identity")
+            identity_material = "\x1f".join(
+                (
+                    unicodedata.normalize("NFKC", account_name).strip().casefold(),
+                    photo_url.strip(),
+                )
             )
+            digest = sha256(identity_material.encode("utf-8")).hexdigest()[:32]
+            return f"ytmusicapi:account:{digest}", account_name.strip()
         display_name = payload.get("accountName")
         return (
             f"ytmusicapi:handle:{handle.strip().casefold()}",

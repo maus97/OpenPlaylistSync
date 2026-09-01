@@ -275,6 +275,28 @@ def test_ytmusicapi_binds_connection_to_the_channel_handle() -> None:
     )
 
 
+def test_ytmusicapi_uses_a_private_fallback_when_channel_handle_is_missing() -> None:
+    library = FakeYTMusic()
+    library.account_info = {
+        "accountName": "Listener",
+        "accountPhotoUrl": "https://yt3.ggpht.example/avatar-1",
+    }
+
+    identity, display_name = _provider(library, FakeYTMusic()).account_identity()
+
+    assert identity.startswith("ytmusicapi:account:")
+    assert len(identity.rsplit(":", 1)[-1]) == 32
+    assert display_name == "Listener"
+
+
+def test_ytmusicapi_rejects_an_account_without_fallback_identity() -> None:
+    library = FakeYTMusic()
+    library.account_info = {"accountName": "Listener"}
+
+    with pytest.raises(AuthorizationRequired, match="account identity"):
+        _provider(library, FakeYTMusic()).account_identity()
+
+
 def test_ytmusicapi_reports_rate_limits_without_retrying() -> None:
     class RateLimitedCatalogue(FakeYTMusic):
         def search(self, *_args, **_kwargs):  # type: ignore[no-untyped-def]

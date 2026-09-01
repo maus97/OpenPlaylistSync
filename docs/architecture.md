@@ -85,6 +85,10 @@ its unofficial YouTube Music transport behind the common provider contract.
 Catalogue song searches use a separate unauthenticated client; library reads
 and writes use ytmusicapi's OAuth token dictionary, loaded only from OPS's
 encrypted credential store. No ytmusicapi `oauth.json` file is created.
+For account identity, OPS prefers the channel handle returned by ytmusicapi. If
+an account has no handle, it uses a short digest of the returned account name
+and avatar URL; missing fallback fields fail closed instead of guessing an
+identity or storing profile data as the account key.
 
 A review is initiated by a CSRF-protected POST, bounded in size/provider
 lookups, and persisted with the complete ordered source and target state hashes.
