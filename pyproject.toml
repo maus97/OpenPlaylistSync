@@ -23,13 +23,14 @@ dependencies = [
     "python-multipart>=0.0.20,<1",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.34,<1",
+    "ytmusicapi>=1.12.2,<1.13",
 ]
 
 [project.optional-dependencies]
 dev = [
     "bandit>=1.9,<2",
     "pip-audit>=2.10,<3",
-    "pytest>=8.3,<9",
+    "pytest>=9.0.3,<10",
     "pytest-asyncio>=0.25,<2",
     "pytest-cov>=6,<7",
     "ruff>=0.9,<1",

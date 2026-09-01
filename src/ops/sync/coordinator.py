@@ -4,18 +4,29 @@ import hashlib
 import json
 import secrets
 from collections import Counter
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from sqlalchemy import select, update
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
-from ops.auth.youtube_music import YouTubeMusicAuthService
+from ops.auth.youtube_music import (
+    YOUTUBE_MUSIC_AUTH_SCHEME,
+    YouTubeMusicAuthService,
+    oauth_token_needs_refresh,
+)
 from ops.config import Settings
-from ops.models import ProviderAccount, ProviderTrackMapping, SyncBaseline, SyncPair, SyncRun
+from ops.models import (
+    ProviderAccount,
+    ProviderSearchCache,
+    ProviderTrackMapping,
+    SyncBaseline,
+    SyncPair,
+    SyncRun,
+)
 from ops.providers.types import ProviderTrack
 from ops.security.crypto import CredentialCipher
 from ops.storage.repositories import (
@@ -53,6 +64,9 @@ MAX_PLAYLIST_TRACKS = 10_000
 MAX_PLAN_ACTIONS = 5_000
 MAX_REVIEW_LOOKUPS = 500
 MAX_MANUAL_CANDIDATES = 5
+SEARCH_CACHE_ALGORITHM_VERSION = 1
+RESOLVED_SEARCH_CACHE_TTL = timedelta(days=14)
+UNRESOLVED_SEARCH_CACHE_TTL = timedelta(hours=12)
 
 
 class ReviewNotApplicable(ValueError):
@@ -113,6 +127,7 @@ def _provider_track_dict(track: ProviderTrack) -> dict[str, object]:
         "isrc": track.isrc,
         "occurrence_id": track.occurrence_id,
         "position": track.position,
+        "explicit": track.explicit,
     }
 
 
@@ -126,6 +141,7 @@ def _provider_track_from_dict(payload: dict[str, object]) -> ProviderTrack:
         isrc=str(payload["isrc"]) if payload.get("isrc") else None,
         occurrence_id=(str(payload["occurrence_id"]) if payload.get("occurrence_id") else None),
         position=payload.get("position"),
+        explicit=payload.get("explicit") if isinstance(payload.get("explicit"), bool) else None,
     )
 
 
@@ -174,6 +190,46 @@ def _decode_candidates(value: str | None) -> dict[int, tuple[ProviderTrack, ...]
         }
     except (TypeError, ValueError, KeyError, json.JSONDecodeError):
         return {}
+
+
+def _action_provider_track(action: ReconciliationAction) -> ProviderTrack:
+    """Restore full resolver evidence from one persisted plan action."""
+
+    return ProviderTrack(
+        provider_track_id=action.track.source_provider_track_id,
+        title=action.track.title,
+        artists=action.track.artists,
+        album=action.track.album,
+        duration_ms=action.track.duration_ms,
+        isrc=action.track.isrc,
+        occurrence_id=action.track.occurrence_id,
+        position=action.track.position,
+        explicit=action.track.explicit,
+    )
+
+
+def _search_fingerprint(track: ProviderTrack) -> str:
+    """Hash only normalized matching evidence; never persist raw credentials."""
+
+    payload = json.dumps(
+        {
+            "provider_track_id": track.provider_track_id,
+            "title": track.title,
+            "artists": track.artists,
+            "album": track.album,
+            "duration_ms": track.duration_ms,
+            "isrc": track.isrc.casefold() if track.isrc else None,
+            "explicit": track.explicit,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _normalized_isrc(value: str | None) -> str | None:
+    return value.strip().casefold() if value and value.strip() else None
 
 
 class SyncCoordinator:
@@ -235,14 +291,9 @@ class SyncCoordinator:
     def _refresh_youtube_music_credentials(
         self, account: ProviderAccount, credentials: dict[str, Any]
     ) -> dict[str, Any]:
-        expires_at = credentials.get("expires_at")
-        try:
-            expired = not expires_at or datetime.fromisoformat(str(expires_at)).astimezone(
-                UTC
-            ) <= datetime.now(UTC)
-        except ValueError:
-            expired = True
-        if not expired:
+        if credentials.get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME:
+            raise ValueError("YouTube Music needs to be reconnected after the ytmusicapi upgrade")
+        if not oauth_token_needs_refresh(credentials):
             return credentials
         refresh_token = credentials.get("refresh_token")
         if not refresh_token:
@@ -256,9 +307,6 @@ class SyncCoordinator:
             **credentials,
             **refreshed,
             "refresh_token": refreshed.get("refresh_token", refresh_token),
-            "expires_at": (
-                datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
-            ).isoformat(),
         }
         if self.cipher is None:
             raise ValueError("credential encryption is not configured")
@@ -274,6 +322,13 @@ class SyncCoordinator:
             credentials = self._refresh_spotify_credentials(account, credentials)
         elif account.provider_name == "youtube_music":
             credentials = self._refresh_youtube_music_credentials(account, credentials)
+            if not self.settings.ytmusic_client_id or not self.settings.ytmusic_client_secret:
+                raise ValueError("YouTube Music OAuth settings are incomplete")
+            credentials = {
+                **credentials,
+                "_ytmusic_client_id": self.settings.ytmusic_client_id,
+                "_ytmusic_client_secret": self.settings.ytmusic_client_secret,
+            }
         return credentials
 
     def _providers(
@@ -351,6 +406,9 @@ class SyncCoordinator:
         account_id: int,
         track: ProviderTrack,
         canonical_key: str,
+        *,
+        source_track: ProviderTrack | None = None,
+        provenance: str = "successful_add",
     ) -> None:
         mapping = self.session.scalar(
             select(ProviderTrackMapping).where(
@@ -365,14 +423,98 @@ class SyncCoordinator:
                 account_id=account_id,
                 provider_track_id=track.provider_track_id,
                 canonical_key=canonical_key,
-                provenance="successful_add",
+                source_provider_track_id=(
+                    source_track.provider_track_id if source_track is not None else None
+                ),
+                source_isrc=_normalized_isrc(source_track.isrc) if source_track else None,
+                provenance=provenance,
                 identity_version=TRACK_IDENTITY_VERSION,
             )
         elif mapping.canonical_key != canonical_key:
             raise TrackMappingConflict(
                 "a verified track identity conflicts with this pair; review it manually"
             )
+        else:
+            mapping.identity_version = TRACK_IDENTITY_VERSION
+            if source_track is not None:
+                mapping.source_provider_track_id = source_track.provider_track_id
+                mapping.source_isrc = _normalized_isrc(source_track.isrc)
         self.session.add(mapping)
+
+    def _save_resolved_track_mappings(
+        self, pair: SyncPair, action: ReconciliationAction, resolved_track: ProviderTrack
+    ) -> None:
+        """Save both directions after a provider accepts an approved addition."""
+
+        source_track = _action_provider_track(action)
+        destination_account_id = (
+            pair.source_account_id if action.side is Side.SOURCE else pair.target_account_id
+        )
+        origin_account_id = (
+            pair.target_account_id if action.side is Side.SOURCE else pair.source_account_id
+        )
+        self._save_track_mapping(
+            pair.id,
+            destination_account_id,
+            resolved_track,
+            action.track.key,
+            source_track=source_track,
+        )
+        # A reciprocal record means a successful YouTube -> Spotify match is
+        # immediately reusable when the next approved change goes the other way.
+        self._save_track_mapping(
+            pair.id,
+            origin_account_id,
+            source_track,
+            action.track.key,
+            source_track=resolved_track,
+            provenance="reciprocal_add",
+        )
+
+    def _assert_resolved_mapping_compatibility(
+        self,
+        pair: SyncPair,
+        plan: ReconciliationPlan,
+        resolutions: dict[int, ProviderTrack],
+    ) -> None:
+        """Reject a conflicting manual/cache choice before any playlist write.
+
+        A provider video can legitimately be added twice, but it must never be
+        silently declared to be two different canonical songs for the same
+        pair.  This preflight closes the otherwise post-write conflict path.
+        """
+
+        for index, resolved_track in resolutions.items():
+            if not 0 <= index < len(plan.actions):
+                raise TrackMappingConflict(
+                    "the persisted review contains an invalid track resolution"
+                )
+            action = plan.actions[index]
+            if action.action is not ActionType.ADD_TRACK:
+                continue
+            destination_account_id = (
+                pair.source_account_id if action.side is Side.SOURCE else pair.target_account_id
+            )
+            origin_account_id = (
+                pair.target_account_id if action.side is Side.SOURCE else pair.source_account_id
+            )
+            source_track = _action_provider_track(action)
+            for account_id, provider_track_id in (
+                (destination_account_id, resolved_track.provider_track_id),
+                (origin_account_id, source_track.provider_track_id),
+            ):
+                existing = self.session.scalar(
+                    select(ProviderTrackMapping).where(
+                        ProviderTrackMapping.pair_id == pair.id,
+                        ProviderTrackMapping.account_id == account_id,
+                        ProviderTrackMapping.provider_track_id == provider_track_id,
+                    )
+                )
+                if existing is not None and existing.canonical_key != action.track.key:
+                    raise TrackMappingConflict(
+                        "a selected recording is already verified as a different song; "
+                        "choose another candidate"
+                    )
 
     def _save_baseline(
         self, pair: SyncPair, source: PlaylistState, target: PlaylistState
@@ -427,6 +569,17 @@ class SyncCoordinator:
         }
         account_ids = set(account_for_side.values())
         keys = {action.track.key for _, action in additions}
+        source_track_ids = {action.track.source_provider_track_id for _, action in additions}
+        source_isrcs = {
+            isrc
+            for _, action in additions
+            if (isrc := _normalized_isrc(action.track.isrc)) is not None
+        }
+        conditions = [ProviderTrackMapping.canonical_key.in_(keys)]
+        if source_track_ids:
+            conditions.append(ProviderTrackMapping.source_provider_track_id.in_(source_track_ids))
+        if source_isrcs:
+            conditions.append(ProviderTrackMapping.source_isrc.in_(source_isrcs))
         mappings = list(
             self.session.scalars(
                 select(ProviderTrackMapping)
@@ -434,32 +587,160 @@ class SyncCoordinator:
                     ProviderTrackMapping.pair_id == pair.id,
                     ProviderTrackMapping.account_id.in_(account_ids),
                     ProviderTrackMapping.identity_version == TRACK_IDENTITY_VERSION,
-                    ProviderTrackMapping.canonical_key.in_(keys),
+                    or_(*conditions),
                 )
                 .order_by(ProviderTrackMapping.updated_at.desc(), ProviderTrackMapping.id.desc())
             )
         )
+        mapping_by_account_and_source_id: dict[tuple[int, str], ProviderTrackMapping] = {}
+        mapping_by_account_and_isrc: dict[tuple[int, str], ProviderTrackMapping] = {}
         mapping_by_account_and_key: dict[tuple[int, str], ProviderTrackMapping] = {}
         for mapping in mappings:
+            if mapping.source_provider_track_id:
+                mapping_by_account_and_source_id.setdefault(
+                    (mapping.account_id, mapping.source_provider_track_id), mapping
+                )
+            if mapping.source_isrc:
+                mapping_by_account_and_isrc.setdefault(
+                    (mapping.account_id, mapping.source_isrc), mapping
+                )
             mapping_by_account_and_key.setdefault(
                 (mapping.account_id, mapping.canonical_key), mapping
             )
-        return {
-            index: ProviderTrack(
-                provider_track_id=mapping.provider_track_id,
-                title=action.track.title,
-                artists=action.track.artists,
-                duration_ms=action.track.duration_ms,
-                isrc=action.track.isrc,
+        resolutions: dict[int, ProviderTrack] = {}
+        for index, action in additions:
+            account_id = account_for_side[action.side]
+            mapping = mapping_by_account_and_source_id.get(
+                (account_id, action.track.source_provider_track_id)
             )
-            for index, action in additions
-            if (
-                mapping := mapping_by_account_and_key.get(
-                    (account_for_side[action.side], action.track.key)
+            if mapping is None and (isrc := _normalized_isrc(action.track.isrc)) is not None:
+                mapping = mapping_by_account_and_isrc.get((account_id, isrc))
+            if mapping is None:
+                mapping = mapping_by_account_and_key.get((account_id, action.track.key))
+            if mapping is not None:
+                resolutions[index] = ProviderTrack(
+                    provider_track_id=mapping.provider_track_id,
+                    title=action.track.title,
+                    artists=action.track.artists,
+                    album=action.track.album,
+                    duration_ms=action.track.duration_ms,
+                    isrc=action.track.isrc,
                 )
+        return resolutions
+
+    def _cached_search_result(
+        self, account_id: int, provider_name: str, track: ProviderTrack
+    ) -> tuple[ProviderTrack | None, tuple[ProviderTrack, ...]] | None:
+        cache = self.session.scalar(
+            select(ProviderSearchCache).where(
+                ProviderSearchCache.account_id == account_id,
+                ProviderSearchCache.provider_name == provider_name,
+                ProviderSearchCache.track_fingerprint == _search_fingerprint(track),
+                ProviderSearchCache.algorithm_version == SEARCH_CACHE_ALGORITHM_VERSION,
             )
-            is not None
-        }
+        )
+        if cache is None or _utc(cache.expires_at) <= datetime.now(UTC):
+            return None
+        try:
+            resolved_payload = (
+                json.loads(cache.resolved_track_json) if cache.resolved_track_json else None
+            )
+            resolved = (
+                _provider_track_from_dict(resolved_payload)
+                if isinstance(resolved_payload, dict)
+                else None
+            )
+            candidates_payload = json.loads(cache.candidate_tracks_json or "[]")
+            candidates = tuple(
+                _provider_track_from_dict(candidate)
+                for candidate in candidates_payload
+                if isinstance(candidate, dict)
+            )
+        except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+            return None
+        return resolved, candidates
+
+    def _save_search_result(
+        self,
+        account_id: int,
+        provider_name: str,
+        track: ProviderTrack,
+        resolved: ProviderTrack | None,
+        candidates: Sequence[ProviderTrack],
+    ) -> None:
+        fingerprint = _search_fingerprint(track)
+        cache = self.session.scalar(
+            select(ProviderSearchCache).where(
+                ProviderSearchCache.account_id == account_id,
+                ProviderSearchCache.provider_name == provider_name,
+                ProviderSearchCache.track_fingerprint == fingerprint,
+                ProviderSearchCache.algorithm_version == SEARCH_CACHE_ALGORITHM_VERSION,
+            )
+        )
+        if cache is None:
+            cache = ProviderSearchCache(
+                account_id=account_id,
+                provider_name=provider_name,
+                track_fingerprint=fingerprint,
+                algorithm_version=SEARCH_CACHE_ALGORITHM_VERSION,
+            )
+        cache.resolved_track_json = (
+            json.dumps(_provider_track_dict(resolved), sort_keys=True, separators=(",", ":"))
+            if resolved is not None
+            else None
+        )
+        cache.candidate_tracks_json = (
+            json.dumps(
+                [_provider_track_dict(candidate) for candidate in candidates],
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            if candidates
+            else None
+        )
+        cache.expires_at = datetime.now(UTC) + (
+            RESOLVED_SEARCH_CACHE_TTL if resolved is not None else UNRESOLVED_SEARCH_CACHE_TTL
+        )
+        self.session.add(cache)
+
+    def _invalidate_stale_resolution(
+        self, pair: SyncPair, action: ReconciliationAction, resolved_track: ProviderTrack
+    ) -> None:
+        """Do not repeat a mapping/search result a provider rejected after review."""
+
+        destination_account_id = (
+            pair.source_account_id if action.side is Side.SOURCE else pair.target_account_id
+        )
+        origin_account_id = (
+            pair.target_account_id if action.side is Side.SOURCE else pair.source_account_id
+        )
+        source_track = _action_provider_track(action)
+        destination_account = self.session.get(ProviderAccount, destination_account_id)
+        if destination_account is None:
+            return
+        self.session.execute(
+            delete(ProviderTrackMapping).where(
+                ProviderTrackMapping.pair_id == pair.id,
+                ProviderTrackMapping.account_id == destination_account_id,
+                ProviderTrackMapping.provider_track_id == resolved_track.provider_track_id,
+            )
+        )
+        self.session.execute(
+            delete(ProviderTrackMapping).where(
+                ProviderTrackMapping.pair_id == pair.id,
+                ProviderTrackMapping.account_id == origin_account_id,
+                ProviderTrackMapping.provider_track_id == source_track.provider_track_id,
+                ProviderTrackMapping.source_provider_track_id == resolved_track.provider_track_id,
+            )
+        )
+        self.session.execute(
+            delete(ProviderSearchCache).where(
+                ProviderSearchCache.account_id == destination_account_id,
+                ProviderSearchCache.provider_name == destination_account.provider_name,
+                ProviderSearchCache.track_fingerprint == _search_fingerprint(source_track),
+                ProviderSearchCache.algorithm_version == SEARCH_CACHE_ALGORITHM_VERSION,
+            )
+        )
 
     def _resolve_additions(
         self,
@@ -471,44 +752,54 @@ class SyncCoordinator:
         resolutions = self._cached_resolutions(pair, plan)
         unresolved: list[int] = []
         candidates_by_index: dict[int, tuple[ProviderTrack, ...]] = {}
-        by_destination_and_key: dict[tuple[Side, str], ProviderTrack | None] = {}
-        candidates_by_destination_and_key: dict[tuple[Side, str], tuple[ProviderTrack, ...]] = {}
+        by_destination_and_fingerprint: dict[
+            tuple[Side, str], tuple[ProviderTrack | None, tuple[ProviderTrack, ...]]
+        ] = {}
+        account_for_side = {
+            Side.SOURCE: pair.source_account_id,
+            Side.TARGET: pair.target_account_id,
+        }
         lookups = 0
         for index, action in enumerate(plan.actions):
             if action.action is not ActionType.ADD_TRACK or index in resolutions:
                 continue
-            lookup_key = (action.side, action.track.key)
             provider = source_provider if action.side is Side.SOURCE else target_provider
-            provider_track = ProviderTrack(
-                provider_track_id=action.track.source_provider_track_id,
-                title=action.track.title,
-                artists=action.track.artists,
-                duration_ms=action.track.duration_ms,
-                isrc=action.track.isrc,
-                occurrence_id=action.track.occurrence_id,
-                position=action.track.position,
-            )
-            if lookup_key in by_destination_and_key:
-                resolved = by_destination_and_key[lookup_key]
+            provider_track = _action_provider_track(action)
+            lookup_key = (action.side, _search_fingerprint(provider_track))
+            if lookup_key in by_destination_and_fingerprint:
+                resolved, candidates = by_destination_and_fingerprint[lookup_key]
             else:
-                lookups += 1
-                if lookups > MAX_REVIEW_LOOKUPS:
-                    raise ValueError(
-                        f"review requires more than {MAX_REVIEW_LOOKUPS} provider searches; "
-                        "split the playlist or establish a trusted baseline"
+                cached = self._cached_search_result(
+                    account_for_side[action.side], provider.name, provider_track
+                )
+                if cached is not None:
+                    resolved, candidates = cached
+                else:
+                    lookups += 1
+                    if lookups > MAX_REVIEW_LOOKUPS:
+                        raise ValueError(
+                            f"review requires more than {MAX_REVIEW_LOOKUPS} provider searches; "
+                            "split the playlist or establish a trusted baseline"
+                        )
+                    resolved = provider.search_track(provider_track)
+                    candidate_lookup = getattr(provider, "close_track_candidates", None)
+                    candidates = (
+                        tuple(candidate_lookup(provider_track))[:MAX_MANUAL_CANDIDATES]
+                        if resolved is None and callable(candidate_lookup)
+                        else ()
                     )
-                resolved = provider.search_track(provider_track)
-                by_destination_and_key[lookup_key] = resolved
+                    self._save_search_result(
+                        account_for_side[action.side],
+                        provider.name,
+                        provider_track,
+                        resolved,
+                        candidates,
+                    )
+                by_destination_and_fingerprint[lookup_key] = (resolved, candidates)
             if resolved is None:
                 unresolved.append(index)
-                candidate_lookup = getattr(provider, "close_track_candidates", None)
-                if callable(candidate_lookup):
-                    candidates = candidates_by_destination_and_key.get(lookup_key)
-                    if candidates is None:
-                        candidates = tuple(candidate_lookup(provider_track))[:MAX_MANUAL_CANDIDATES]
-                        candidates_by_destination_and_key[lookup_key] = candidates
-                    if candidates:
-                        candidates_by_index[index] = candidates
+                if candidates:
+                    candidates_by_index[index] = candidates
             else:
                 resolutions[index] = resolved
         return resolutions, tuple(unresolved), candidates_by_index
@@ -845,6 +1136,8 @@ class SyncCoordinator:
                 source_provider,
                 target_provider,
             )
+            resolutions = _decode_resolutions(run.resolution_json)
+            self._assert_resolved_mapping_compatibility(pair, plan, resolutions)
             self._consume_review(run, approval)
 
             action_repo = SyncActionRepository(self.session)
@@ -859,7 +1152,6 @@ class SyncCoordinator:
                 for ordinal, action in enumerate(plan.actions)
             ]
             self.session.commit()
-            resolutions = _decode_resolutions(run.resolution_json)
 
             def completed(index: int) -> None:
                 action_repo.complete(journal[index])
@@ -878,13 +1170,11 @@ class SyncCoordinator:
                 skip_unresolved=skip_unresolved,
                 pre_resolved_tracks=resolutions,
                 on_action_completed=completed,
-                on_track_resolved=lambda action, track: self._save_track_mapping(
-                    pair.id,
-                    pair.source_account_id
-                    if action.side is Side.SOURCE
-                    else pair.target_account_id,
-                    track,
-                    action.track.key,
+                on_track_resolved=lambda action, track: self._save_resolved_track_mappings(
+                    pair, action, track
+                ),
+                on_track_unavailable=lambda action, track: self._invalidate_stale_resolution(
+                    pair, action, track
                 ),
             )
             for index in result.skipped_indices:

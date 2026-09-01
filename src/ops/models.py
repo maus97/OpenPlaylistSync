@@ -109,8 +109,37 @@ class ProviderTrackMapping(Base):
     account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), nullable=False)
     provider_track_id: Mapped[str] = mapped_column(String(255), nullable=False)
     canonical_key: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_provider_track_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    source_isrc: Mapped[str | None] = mapped_column(String(64), nullable=True)
     provenance: Mapped[str] = mapped_column(String(32), nullable=False, default="successful_add")
-    identity_version: Mapped[int] = mapped_column(Integer, nullable=False, default=2)
+    identity_version: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class ProviderSearchCache(Base):
+    """Bounded reusable search evidence that reduces provider catalogue calls."""
+
+    __tablename__ = "provider_search_cache"
+    __table_args__ = (
+        UniqueConstraint(
+            "account_id",
+            "provider_name",
+            "track_fingerprint",
+            "algorithm_version",
+            name="uq_provider_search_cache_identity",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), nullable=False)
+    provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    track_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    algorithm_version: Mapped[int] = mapped_column(Integer, nullable=False)
+    resolved_track_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    candidate_tracks_json: Mapped[str | None] = mapped_column(Text, nullable=True)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )

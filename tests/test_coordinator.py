@@ -3,16 +3,16 @@ from pathlib import Path
 
 import pytest
 from cryptography.fernet import Fernet
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 
 from ops.config import Settings
 from ops.db import Base
-from ops.models import ProviderAccount, ProviderTrackMapping, SyncPair
-from ops.providers.base import ProviderUnavailable
+from ops.models import ProviderAccount, ProviderSearchCache, ProviderTrackMapping, SyncPair
+from ops.providers.base import ProviderUnavailable, TrackUnavailable
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 from ops.storage.repositories import SyncActionRepository, SyncBaselineRepository, SyncRunRepository
-from ops.sync.coordinator import AmbiguousSpotifyRemoval, SyncCoordinator
+from ops.sync.coordinator import AmbiguousSpotifyRemoval, SyncCoordinator, TrackMappingConflict
 from ops.sync.domain import (
     ActionType,
     InitialSyncPolicy,
@@ -181,6 +181,64 @@ def test_review_looks_up_duplicate_tracks_once() -> None:
     engine.dispose()
 
 
+def test_review_does_not_reuse_a_search_for_different_track_evidence() -> None:
+    """Same title/artist can still be a different recording or release."""
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="test_source", external_account_id="source")
+        target = ProviderAccount(provider_name="test_target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="spotify:source-playlist",
+            target_playlist_id="youtube_music:target-playlist",
+            initial_sync_policy=InitialSyncPolicy.MERGE.value,
+        )
+        session.add(pair)
+        session.commit()
+
+        providers = {
+            source.id: InMemoryProvider(
+                "spotify",
+                "spotify:source-playlist",
+                [
+                    ProviderTrack(
+                        "spotify:original",
+                        "Song",
+                        ("Artist",),
+                        album="Original album",
+                        duration_ms=180_000,
+                        isrc="ISRC-ORIGINAL",
+                    ),
+                    ProviderTrack(
+                        "spotify:remaster",
+                        "Song",
+                        ("Artist",),
+                        album="Remaster album",
+                        duration_ms=184_000,
+                        isrc="ISRC-REMASTER",
+                    ),
+                ],
+            ),
+            target.id: InMemoryProvider("youtube_music", "youtube_music:target-playlist", []),
+        }
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: providers[account.id],
+        )
+
+        review = coordinator.prepare_review(pair)
+
+        assert len(review.plan.actions) == 2
+        assert providers[target.id].search_calls == 2
+    engine.dispose()
+
+
 def test_operator_can_select_a_persisted_close_match_before_apply() -> None:
     class ManualCandidateProvider(InMemoryProvider):
         def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
@@ -240,6 +298,61 @@ def test_operator_can_select_a_persisted_close_match_before_apply() -> None:
         assert selected.candidate_options == ()
         coordinator.apply(pair, selected.plan, _approval(review))
         assert providers[target.id].tracks[0].provider_track_id == "youtube_music:manual-choice"
+    engine.dispose()
+
+
+def test_manual_candidate_mapping_conflict_fails_before_a_playlist_write() -> None:
+    class ManualCandidateProvider(InMemoryProvider):
+        def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
+            self.search_calls += 1
+            return None
+
+        def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:
+            return (ProviderTrack("youtube_music:shared", track.title, track.artists),)
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="source", external_account_id="source")
+        target = ProviderAccount(provider_name="target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="source:playlist",
+            target_playlist_id="target:playlist",
+        )
+        session.add(pair)
+        session.flush()
+        session.add(
+            ProviderTrackMapping(
+                pair_id=pair.id,
+                account_id=target.id,
+                provider_track_id="youtube_music:shared",
+                canonical_key="text:another-song|artist",
+                provenance="successful_add",
+            )
+        )
+        session.commit()
+        providers = {
+            source.id: InMemoryProvider(
+                "source", "source:playlist", [ProviderTrack("source:one", "One", ("Artist",))]
+            ),
+            target.id: ManualCandidateProvider("target", "target:playlist", []),
+        }
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: providers[account.id],
+        )
+
+        review = coordinator.prepare_review(pair)
+        selected = coordinator.select_candidate(pair, review.review_id, 0, "youtube_music:shared")
+
+        with pytest.raises(TrackMappingConflict, match="different song"):
+            coordinator.apply(pair, selected.plan, _approval(review))
+        assert providers[target.id].tracks == []
     engine.dispose()
 
 
@@ -412,6 +525,168 @@ def test_pair_scoped_mapping_does_not_reclassify_another_pair() -> None:
         )
 
         assert coordinator._apply_track_mappings(second.id, target.id, state) == state
+    engine.dispose()
+
+
+def test_mapping_cache_prefers_source_track_id_over_normalized_metadata() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="spotify", external_account_id="source")
+        target = ProviderAccount(provider_name="youtube_music", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="spotify:source",
+            target_playlist_id="youtube_music:target",
+        )
+        session.add(pair)
+        session.flush()
+        session.add(
+            ProviderTrackMapping(
+                pair_id=pair.id,
+                account_id=target.id,
+                provider_track_id="youtube_music:verified-video",
+                canonical_key="text:old-title|artist",
+                source_provider_track_id="spotify:exact-track",
+                source_isrc="isrc-123",
+                provenance="successful_add",
+            )
+        )
+        session.commit()
+        plan = ReconciliationPlan(
+            actions=(
+                ReconciliationAction(
+                    Side.TARGET,
+                    ActionType.ADD_TRACK,
+                    TrackState(
+                        "text:renamed-title|artist",
+                        "Renamed title",
+                        ("Artist",),
+                        "spotify:exact-track",
+                        isrc="ISRC-123",
+                    ),
+                    "test",
+                ),
+            ),
+            conflicts=(),
+        )
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda *_: None,  # type: ignore[arg-type,return-value]
+        )
+
+        cached = coordinator._cached_resolutions(pair, plan)
+
+        assert cached[0].provider_track_id == "youtube_music:verified-video"
+    engine.dispose()
+
+
+def test_durable_search_cache_avoids_repeating_an_unapplied_catalogue_lookup() -> None:
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="source", external_account_id="source")
+        target = ProviderAccount(provider_name="target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="source:playlist",
+            target_playlist_id="target:playlist",
+        )
+        session.add(pair)
+        session.commit()
+        source_provider = InMemoryProvider(
+            "source", "source:playlist", [ProviderTrack("source:one", "One", ("Artist",))]
+        )
+        target_provider = InMemoryProvider("target", "target:playlist", [])
+        plan = ReconciliationPlan(
+            actions=(
+                ReconciliationAction(
+                    Side.TARGET,
+                    ActionType.ADD_TRACK,
+                    TrackState("text:one|artist", "One", ("Artist",), "source:one"),
+                    "test",
+                ),
+            ),
+            conflicts=(),
+        )
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: source_provider if account.id == source.id else target_provider,
+        )
+
+        coordinator._resolve_additions(pair, plan, source_provider, target_provider)
+        session.commit()
+        coordinator._resolve_additions(pair, plan, source_provider, target_provider)
+
+        assert target_provider.search_calls == 1
+        assert session.scalar(select(ProviderSearchCache)) is not None
+    engine.dispose()
+
+
+def test_rejected_mapped_track_is_invalidated_before_the_next_review() -> None:
+    class RejectingProvider(InMemoryProvider):
+        def add_tracks(self, playlist_id: str, tracks: Sequence[ProviderTrack]) -> str:
+            del playlist_id, tracks
+            raise TrackUnavailable("unavailable")
+
+    engine = create_engine("sqlite://")
+    Base.metadata.create_all(engine)
+    with Session(engine) as session:
+        source = ProviderAccount(provider_name="source", external_account_id="source")
+        target = ProviderAccount(provider_name="target", external_account_id="target")
+        session.add_all((source, target))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=source.id,
+            target_account_id=target.id,
+            source_playlist_id="source:playlist",
+            target_playlist_id="target:playlist",
+        )
+        session.add(pair)
+        session.flush()
+        session.add(
+            ProviderTrackMapping(
+                pair_id=pair.id,
+                account_id=target.id,
+                provider_track_id="target:unavailable",
+                canonical_key="text:one|artist",
+                source_provider_track_id="source:one",
+                provenance="successful_add",
+            )
+        )
+        session.commit()
+        providers = {
+            source.id: InMemoryProvider(
+                "source", "source:playlist", [ProviderTrack("source:one", "One", ("Artist",))]
+            ),
+            target.id: RejectingProvider("target", "target:playlist", []),
+        }
+        coordinator = SyncCoordinator(
+            session,
+            Settings(credential_encryption_key=Fernet.generate_key().decode("ascii")),
+            lambda account, _: providers[account.id],
+        )
+
+        review = coordinator.prepare_review(pair)
+        coordinator.apply(pair, review.plan, _approval(review))
+
+        assert (
+            session.scalar(
+                select(ProviderTrackMapping).where(
+                    ProviderTrackMapping.pair_id == pair.id,
+                    ProviderTrackMapping.account_id == target.id,
+                )
+            )
+            is None
+        )
     engine.dispose()
 
 

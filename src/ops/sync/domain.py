@@ -10,7 +10,9 @@ from enum import StrEnum
 
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
-TRACK_IDENTITY_VERSION = 2
+# ytmusicapi returns catalogue metadata rather than upload metadata. Existing
+# baselines therefore need an explicit, non-destructive re-baselining review.
+TRACK_IDENTITY_VERSION = 3
 
 
 def normalize_text(value: str) -> str:
@@ -52,10 +54,12 @@ class TrackState:
     title: str
     artists: tuple[str, ...]
     source_provider_track_id: str
+    album: str | None = None
     duration_ms: int | None = None
     isrc: str | None = None
     occurrence_id: str | None = None
     position: int | None = None
+    explicit: bool | None = None
 
     @classmethod
     def from_provider_track(cls, track: ProviderTrack) -> "TrackState":
@@ -64,10 +68,12 @@ class TrackState:
             title=track.title,
             artists=track.artists,
             source_provider_track_id=track.provider_track_id,
+            album=track.album,
             duration_ms=track.duration_ms,
             isrc=track.isrc,
             occurrence_id=track.occurrence_id,
             position=track.position,
+            explicit=track.explicit,
         )
 
 

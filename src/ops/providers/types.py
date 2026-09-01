@@ -15,6 +15,7 @@ class ProviderTrack:
     isrc: str | None = None
     occurrence_id: str | None = None
     position: int | None = None
+    explicit: bool | None = None
 
 
 @dataclass(frozen=True, slots=True)

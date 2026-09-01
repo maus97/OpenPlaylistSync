@@ -96,6 +96,7 @@ class SpotifyProvider:
             isrc=(track.get("external_ids") or {}).get("isrc"),
             occurrence_id=str(position) if position is not None else None,
             position=position,
+            explicit=track.get("explicit") if isinstance(track.get("explicit"), bool) else None,
         )
 
     def _pages(
@@ -141,7 +142,7 @@ class SpotifyProvider:
             f"/playlists/{raw_id}/items",
             params={
                 "fields": (
-                    "items(item(id,name,artists(name),album(name),duration_ms,"
+                    "items(item(id,name,artists(name),album(name),duration_ms,explicit,"
                     "external_ids,is_local,type)),next"
                 ),
                 "market": "from_token",
@@ -181,12 +182,12 @@ class SpotifyProvider:
 
     @classmethod
     def _search_metadata(cls, track: ProviderTrack) -> ProviderTrack | None:
-        """Turn a YouTube upload title/channel into cautious Spotify metadata.
+        """Normalize any legacy YouTube upload title/channel for Spotify search.
 
-        The YouTube Data API exposes the uploaded video's title and channel,
-        rather than catalogue-level artist/title fields. We only remove
-        technical upload labels; qualifiers such as acoustic, live, and remix
-        remain part of the requested title and are required by scoring below.
+        The ytmusicapi adapter supplies catalogue metadata. This compatibility
+        cleanup is retained for old persisted reviews and malformed provider
+        values; it removes only technical display labels, while acoustic, live,
+        and remix qualifiers remain required by scoring below.
         """
 
         title = cls._strip_display_metadata(track.title)
@@ -212,10 +213,12 @@ class SpotifyProvider:
             provider_track_id=track.provider_track_id,
             title=title.strip(),
             artists=artists,
+            album=track.album,
             duration_ms=track.duration_ms,
             isrc=track.isrc,
             occurrence_id=track.occurrence_id,
             position=track.position,
+            explicit=track.explicit,
         )
 
     @staticmethod
@@ -280,6 +283,8 @@ class SpotifyProvider:
                 score += 10.0
             elif difference > 15_000:
                 score -= 25.0
+        if requested.explicit is not None and candidate.explicit is not None:
+            score += 4.0 if requested.explicit == candidate.explicit else -35.0
         return score
 
     @classmethod

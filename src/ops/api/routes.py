@@ -14,13 +14,19 @@ from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
-from ops.auth.youtube_music import YouTubeMusicAuthService, YouTubeMusicOAuthError
+from ops.auth.youtube_music import (
+    YOUTUBE_MUSIC_AUTH_SCHEME,
+    YouTubeMusicAuthService,
+    YouTubeMusicOAuthError,
+    oauth_token_needs_refresh,
+)
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
 from ops.models import (
     LocalAdministrator,
     ProviderAccount,
+    ProviderSearchCache,
     ProviderTrackMapping,
     SyncAction,
     SyncBaseline,
@@ -29,7 +35,7 @@ from ops.models import (
 )
 from ops.providers.base import ProviderError
 from ops.providers.factory import create_provider
-from ops.providers.youtube_music import YouTubeMusicProvider
+from ops.providers.youtube_music import YTMusicApiProvider
 from ops.security.bootstrap import (
     BootstrapAuthorizationError,
     consume_bootstrap_token,
@@ -259,6 +265,13 @@ def provider_for_account(session: Session, app_settings: Settings, account: Prov
         credentials = _refresh_youtube_music_credentials(
             session, app_settings, account, credentials
         )
+        if not app_settings.ytmusic_client_id or not app_settings.ytmusic_client_secret:
+            raise ValueError("YouTube Music OAuth settings are incomplete")
+        credentials = {
+            **credentials,
+            "_ytmusic_client_id": app_settings.ytmusic_client_id,
+            "_ytmusic_client_secret": app_settings.ytmusic_client_secret,
+        }
     return create_provider(account, credentials)
 
 
@@ -268,16 +281,11 @@ def _refresh_youtube_music_credentials(
     account: ProviderAccount,
     credentials: dict[str, Any],
 ) -> dict[str, Any]:
-    """Refresh an expired Google OAuth token before a YouTube Data API request."""
+    """Refresh OPS's encrypted ytmusicapi token before account operations."""
 
-    expires_at = credentials.get("expires_at")
-    try:
-        expired = not expires_at or datetime.fromisoformat(str(expires_at)).astimezone(
-            UTC
-        ) <= datetime.now(UTC)
-    except ValueError:
-        expired = True
-    if not expired:
+    if credentials.get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME:
+        raise ValueError("YouTube Music needs to be reconnected after the ytmusicapi upgrade")
+    if not oauth_token_needs_refresh(credentials):
         return credentials
     refresh_token = credentials.get("refresh_token")
     if (
@@ -293,9 +301,6 @@ def _refresh_youtube_music_credentials(
         **credentials,
         **refreshed,
         "refresh_token": refreshed.get("refresh_token", refresh_token),
-        "expires_at": (
-            datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
-        ).isoformat(),
     }
     ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key or "")
@@ -660,10 +665,11 @@ def youtube_music_complete(
         return RedirectResponse(
             "/pairs?connection_error=youtube_music", status_code=status.HTTP_303_SEE_OTHER
         )
-    token["expires_at"] = (
-        datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
-    ).isoformat()
-    identity = YouTubeMusicProvider(access_token=str(token["access_token"]))
+    identity = YTMusicApiProvider(
+        token,
+        client_id=app_settings.ytmusic_client_id,
+        client_secret=app_settings.ytmusic_client_secret,
+    )
     try:
         external_account_id, display_name = identity.account_identity()
     except ProviderError:
@@ -674,12 +680,30 @@ def youtube_music_complete(
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
     )
-    connected_other = session.scalar(
-        select(ProviderAccount).where(
-            ProviderAccount.provider_name == "youtube_music",
-            ProviderAccount.credentials_ciphertext.is_not(None),
-            ProviderAccount.external_account_id.not_in((external_account_id, "default")),
+    all_youtube_accounts = list(
+        session.scalars(
+            select(ProviderAccount).where(
+                ProviderAccount.provider_name == "youtube_music",
+            )
         )
+    )
+    connected_accounts = [
+        candidate
+        for candidate in all_youtube_accounts
+        if candidate.credentials_ciphertext is not None
+    ]
+    current_accounts = [
+        candidate
+        for candidate in connected_accounts
+        if account_repo.load_credentials(candidate).get("auth_scheme") == YOUTUBE_MUSIC_AUTH_SCHEME
+    ]
+    connected_other = next(
+        (
+            candidate
+            for candidate in current_accounts
+            if candidate.external_account_id != external_account_id
+        ),
+        None,
     )
     if connected_other is not None:
         return RedirectResponse(
@@ -689,6 +713,62 @@ def youtube_music_complete(
     account = account_repo.get_by_external_id("youtube_music", external_account_id)
     if account is None:
         account = account_repo.get_by_external_id("youtube_music", "default")
+    legacy_accounts = [
+        candidate
+        for candidate in connected_accounts
+        if account_repo.load_credentials(candidate).get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME
+    ]
+    if legacy_accounts and account is not None:
+        # A newly connected ytmusicapi account can coexist with stale records
+        # only after an interrupted prior upgrade. Those pairs must remain
+        # paused because the legacy credential format cannot safely run.
+        session.execute(
+            update(SyncPair)
+            .where(
+                (SyncPair.source_account_id.in_([candidate.id for candidate in legacy_accounts]))
+                | (SyncPair.target_account_id.in_([candidate.id for candidate in legacy_accounts]))
+            )
+            .values(enabled=False)
+        )
+    if account is None and len(legacy_accounts) == 1:
+        # The old adapter used a Data API channel ID while ytmusicapi exposes a
+        # channel handle. Preserve the encrypted account record and pair IDs,
+        # but pause every pair until the operator reviews the new provider view.
+        account = legacy_accounts[0]
+        account.external_account_id = external_account_id
+        session.execute(
+            update(SyncPair)
+            .where(
+                (SyncPair.source_account_id == account.id)
+                | (SyncPair.target_account_id == account.id)
+            )
+            .values(enabled=False)
+        )
+    elif account is None and len(legacy_accounts) > 1:
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music_account_change",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if account is None and not connected_accounts:
+        disconnected_accounts = [
+            candidate
+            for candidate in all_youtube_accounts
+            if candidate.credentials_ciphertext is None
+        ]
+        if len(disconnected_accounts) == 1:
+            # A user may have deliberately disconnected the legacy adapter
+            # before upgrading. Reuse its pair references only when there is
+            # exactly one unambiguous disconnected YouTube account.
+            account = disconnected_accounts[0]
+            account.external_account_id = external_account_id
+            session.execute(
+                update(SyncPair)
+                .where(
+                    (SyncPair.source_account_id == account.id)
+                    | (SyncPair.target_account_id == account.id)
+                )
+                .values(enabled=False)
+            )
     if account is None:
         account = ProviderAccount(
             provider_name="youtube_music",
@@ -1034,6 +1114,11 @@ def disconnect_provider(
     for account in accounts:
         account.credentials_ciphertext = None
         account.credential_key_id = None
+    # Search evidence is not credential material, but it is account-specific
+    # listening metadata and should not survive an explicit disconnect.
+    session.execute(
+        delete(ProviderSearchCache).where(ProviderSearchCache.account_id.in_(account_ids))
+    )
     session.execute(
         update(SyncPair)
         .where(

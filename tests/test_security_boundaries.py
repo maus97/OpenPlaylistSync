@@ -1,12 +1,14 @@
 import logging
 import re
 from collections.abc import Generator
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session, sessionmaker
 
@@ -16,11 +18,13 @@ from ops.config import Settings
 from ops.configuration import load_app_settings, load_saved_settings
 from ops.db import Base, build_engine, get_db
 from ops.main import create_app
-from ops.models import LocalAdministrator, ProviderAccount, SyncPair
+from ops.models import LocalAdministrator, ProviderAccount, ProviderSearchCache, SyncPair
 from ops.security import middleware as authentication_middleware
 from ops.security.bootstrap import bootstrap_token, consume_bootstrap_token, verify_bootstrap_token
+from ops.security.crypto import CredentialCipher
 from ops.security.logging import SensitiveQueryFilter, redact_query
 from ops.security.network import client_address
+from ops.storage.repositories import ProviderAccountRepository
 
 
 def _csrf(response_text: str) -> str:
@@ -34,6 +38,7 @@ def _isolated_client(
     monkeypatch: pytest.MonkeyPatch,
     *,
     production: bool = False,
+    ytmusic_configured: bool = False,
 ) -> tuple[TestClient, sessionmaker[Session], Settings]:
     database_path = tmp_path / "ops.db"
     settings = Settings(
@@ -47,6 +52,8 @@ def _isolated_client(
         allowed_hosts="testserver",
         scheduler_enabled=False,
         max_request_body_bytes=1024,
+        ytmusic_client_id="ytmusic-client" if ytmusic_configured else None,
+        ytmusic_client_secret="ytmusic-secret" if ytmusic_configured else None,
     )
     engine = build_engine(settings)
     Base.metadata.create_all(engine)
@@ -269,6 +276,141 @@ def test_review_and_oauth_initiation_are_csrf_protected_posts(
     assert selected.status_code == 303
     assert selected.headers["location"] == f"/sync/plan/{pair_id}?review_id=9"
     assert calls["select"] == 1
+
+
+def test_ytmusicapi_reconnects_one_legacy_account_and_pauses_its_pairs(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    class FakeYouTubeMusicAuthService:
+        def __init__(self, client_id: str, client_secret: str) -> None:
+            assert (client_id, client_secret) == ("ytmusic-client", "ytmusic-secret")
+
+        def request_code(self) -> dict[str, str]:
+            return {
+                "device_code": "test-device-code",
+                "user_code": "ABC-DEF",
+                "verification_url": "https://www.google.com/device",
+            }
+
+        def exchange_device_code(self, device_code: str) -> dict[str, object]:
+            assert device_code == "test-device-code"
+            return {
+                "auth_scheme": "ytmusicapi_oauth",
+                "access_token": "new-access-token",
+                "refresh_token": "new-refresh-token",
+                "scope": "https://www.googleapis.com/auth/youtube",
+                "token_type": "Bearer",
+                "expires_at": 4_102_444_800,
+                "expires_in": 3600,
+            }
+
+    class FakeYTMusicApiProvider:
+        def __init__(self, _token, *, client_id: str, client_secret: str) -> None:  # type: ignore[no-untyped-def]
+            assert (client_id, client_secret) == ("ytmusic-client", "ytmusic-secret")
+
+        def account_identity(self) -> tuple[str, str]:
+            return ("ytmusicapi:handle:@listener", "Listener")
+
+    monkeypatch.setattr(routes, "YouTubeMusicAuthService", FakeYouTubeMusicAuthService)
+    monkeypatch.setattr(routes, "YTMusicApiProvider", FakeYTMusicApiProvider)
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch, ytmusic_configured=True)
+    _complete_setup(client, settings)
+    with factory() as session:
+        youtube = ProviderAccount(
+            provider_name="youtube_music", external_account_id="legacy-channel"
+        )
+        spotify = ProviderAccount(provider_name="spotify", external_account_id="listener")
+        session.add_all((youtube, spotify))
+        session.flush()
+        ProviderAccountRepository(
+            session, CredentialCipher(settings.credential_encryption_key or "")
+        ).save_credentials(
+            youtube, {"access_token": "legacy-token", "refresh_token": "legacy-refresh"}
+        )
+        pair = SyncPair(
+            source_account_id=spotify.id,
+            target_account_id=youtube.id,
+            source_playlist_id="spotify:playlist",
+            target_playlist_id="youtube_music:playlist",
+        )
+        session.add(pair)
+        session.commit()
+        youtube_id = youtube.id
+        pair_id = pair.id
+
+    csrf = _csrf(client.get("/settings").text)
+    start = client.post("/auth/youtube_music/start", data={"csrf_token": csrf})
+    assert start.status_code == 200
+    response = client.post(
+        "/auth/youtube_music/complete",
+        data={"csrf_token": csrf},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    assert response.headers["location"] == "/pairs?connected=youtube_music"
+    with factory() as session:
+        youtube = session.get(ProviderAccount, youtube_id)
+        pair = session.get(SyncPair, pair_id)
+        assert youtube is not None
+        assert youtube.external_account_id == "ytmusicapi:handle:@listener"
+        assert youtube.credentials_ciphertext is not None
+        assert "new-access-token" not in youtube.credentials_ciphertext
+        assert pair is not None and not pair.enabled
+
+
+def test_disconnect_clears_account_scoped_search_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    _complete_setup(client, settings)
+    with factory() as session:
+        account = ProviderAccount(
+            provider_name="youtube_music",
+            external_account_id="ytmusicapi:handle:@listener",
+            credentials_ciphertext="encrypted-test-value",
+            credential_key_id="primary",
+        )
+        other = ProviderAccount(provider_name="spotify", external_account_id="listener")
+        session.add_all((account, other))
+        session.flush()
+        pair = SyncPair(
+            source_account_id=other.id,
+            target_account_id=account.id,
+            source_playlist_id="spotify:playlist",
+            target_playlist_id="youtube_music:playlist",
+        )
+        session.add_all(
+            (
+                pair,
+                ProviderSearchCache(
+                    account_id=account.id,
+                    provider_name="youtube_music",
+                    track_fingerprint="a" * 64,
+                    algorithm_version=1,
+                    candidate_tracks_json="[]",
+                    expires_at=datetime.now(UTC) + timedelta(hours=1),
+                ),
+            )
+        )
+        session.commit()
+        account_id = account.id
+        pair_id = pair.id
+
+    csrf = _csrf(client.get("/settings").text)
+    response = client.post(
+        "/accounts/youtube_music/disconnect",
+        data={"csrf_token": csrf},
+        follow_redirects=False,
+    )
+
+    assert response.status_code == 303
+    with factory() as session:
+        account = session.get(ProviderAccount, account_id)
+        pair = session.get(SyncPair, pair_id)
+        assert account is not None and account.credentials_ciphertext is None
+        assert pair is not None and not pair.enabled
+        assert session.scalar(select(ProviderSearchCache)) is None
 
 
 def test_generated_bootstrap_token_is_private_one_time_state(tmp_path: Path) -> None:
