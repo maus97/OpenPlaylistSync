@@ -33,6 +33,9 @@ _VARIANT_TOKENS = {
     "sped",
     "nightcore",
     "cover",
+    "guitar",
+    "piano",
+    "orchestral",
 }
 
 
@@ -53,6 +56,12 @@ class SpotifyProvider:
     def __init__(self, access_token: str | None = None, client: httpx.Client | None = None) -> None:
         self.access_token = access_token
         self.client = client or httpx.Client(base_url="https://api.spotify.com/v1", timeout=20)
+        # A review may ask for both an automatic decision and a human fallback
+        # for the same track.  Keep the provider read to one request in that
+        # case; this is especially important for larger first-sync reviews.
+        self._search_candidates_cache: dict[
+            tuple[str, tuple[str, ...], str | None, int | None], tuple[ProviderTrack, ...]
+        ] = {}
 
     def _headers(self) -> dict[str, str]:
         if not self.access_token:
@@ -103,20 +112,52 @@ class SpotifyProvider:
         self, first_payload: dict[str, Any], items_key: str = "items"
     ) -> Iterable[dict[str, Any]]:
         payload = first_payload
-        while True:
-            yield from payload.get(items_key, [])
+        seen_urls: set[str] = set()
+        received = 0
+        expected_total: int | None = None
+        for _page in range(1000):
+            if not isinstance(payload, dict) or not isinstance(payload.get(items_key), list):
+                raise ProviderUnavailable("Spotify returned an incomplete playlist response")
+            items = payload[items_key]
+            if any(not isinstance(item, dict) for item in items):
+                raise ProviderUnavailable("Spotify returned an unreadable playlist entry")
+            total = payload.get("total")
+            if total is not None:
+                if type(total) is not int or total < 0:
+                    raise ProviderUnavailable("Spotify returned an invalid playlist count")
+                if expected_total is not None and total != expected_total:
+                    raise ProviderUnavailable("Spotify playlist changed while it was being read")
+                expected_total = total
+            offset = payload.get("offset")
+            if offset is not None and (type(offset) is not int or offset != received):
+                raise ProviderUnavailable("Spotify returned an incomplete playlist page")
+            received += len(items)
+            yield from items
             next_url = payload.get("next")
-            if not next_url:
+            if next_url is None or next_url == "":
+                if expected_total is not None and received != expected_total:
+                    raise ProviderUnavailable("Spotify returned an incomplete playlist response")
                 return
-            parsed = urlsplit(str(next_url))
-            if not (
-                parsed.scheme == "https"
-                and parsed.hostname == "api.spotify.com"
-                and parsed.port in (None, 443)
-                and parsed.path.startswith("/v1/")
-            ):
+            try:
+                parsed = urlsplit(next_url) if isinstance(next_url, str) else None
+                trusted = bool(
+                    parsed
+                    and parsed.scheme == "https"
+                    and parsed.hostname == "api.spotify.com"
+                    and parsed.port in (None, 443)
+                    and not parsed.username
+                    and not parsed.password
+                    and parsed.path.startswith("/v1/")
+                )
+            except ValueError:
+                trusted = False
+            if not trusted:
                 raise ProviderUnavailable("Spotify returned an invalid pagination URL")
+            if not items or next_url in seen_urls:
+                raise ProviderUnavailable("Spotify returned a repeated or empty playlist page")
+            seen_urls.add(next_url)
             payload = self._request("GET", next_url).json()
+        raise ProviderUnavailable("Spotify returned too many playlist pages")
 
     def list_playlists(self) -> Sequence[ProviderPlaylist]:
         payload = self._request("GET", "/me/playlists", params={"limit": 50}).json()
@@ -130,30 +171,61 @@ class SpotifyProvider:
 
     def get_playlist(self, playlist_id: str) -> ProviderPlaylist:
         raw_id = playlist_id.removeprefix("spotify:")
-        payload = self._request(
-            "GET",
-            f"/playlists/{raw_id}",
-            params={"fields": "id,name,description,snapshot_id", "market": "from_token"},
-        ).json()
-        # Spotify removed the old ``/tracks`` playlist endpoint in favor of
-        # ``/items``. The nested track object is now named ``item``.
-        tracks_payload = self._request(
-            "GET",
-            f"/playlists/{raw_id}/items",
-            params={
-                "fields": (
-                    "items(item(id,name,artists(name),album(name),duration_ms,explicit,"
-                    "external_ids,is_local,type)),next"
-                ),
-                "market": "from_token",
-                "limit": "50",
-            },
-        ).json()
+        try:
+            payload = self._request(
+                "GET",
+                f"/playlists/{raw_id}",
+                params={"fields": "id,name,description,snapshot_id", "market": "from_token"},
+            ).json()
+        except AuthorizationRequired as exc:
+            raise AuthorizationRequired(
+                "Spotify denied access to this playlist. Make sure it is shared with the "
+                "connected Spotify account, then reconnect Spotify and approve playlist access."
+            ) from exc
+        if not isinstance(payload, dict) or payload.get("id") != raw_id:
+            raise ProviderUnavailable("Spotify returned an invalid playlist response")
+        # Spotify can reveal basic details for a followed or listening-only
+        # shared playlist but still forbid its items. Keep that distinction in
+        # the UI: reauthorizing cannot grant ownership/collaborator status.
+        try:
+            # Spotify removed the old ``/tracks`` playlist endpoint in favor of
+            # ``/items``. The nested track object is now named ``item``.
+            tracks_payload = self._request(
+                "GET",
+                f"/playlists/{raw_id}/items",
+                params={
+                    "fields": (
+                        "items(item(id,name,artists(name),album(name),duration_ms,explicit,"
+                        "external_ids,is_local,type)),next,total,offset"
+                    ),
+                    "market": "from_token",
+                    "limit": "50",
+                },
+            ).json()
+        except AuthorizationRequired as exc:
+            raise AuthorizationRequired(
+                "Spotify allows OPS to see this playlist but not read its tracks. "
+                "The connected account must be the owner or a collaborator; "
+                "a view-only share or follow cannot be synchronized through Spotify's API."
+            ) from exc
         tracks: list[ProviderTrack] = []
         for position, item in enumerate(self._pages(tracks_payload)):
+            raw_track = item.get("item") if "item" in item else item.get("track", item)
+            if isinstance(raw_track, dict) and (
+                raw_track.get("is_local") is True or raw_track.get("type") == "episode"
+            ):
+                # Local files and podcast episodes are not synchronizable music.
+                continue
+            if not isinstance(raw_track, dict) or not raw_track.get("id"):
+                # Missing catalogue data is not evidence that the user removed
+                # the corresponding song from this playlist.
+                raise ProviderUnavailable(
+                    "Spotify could not identify every playlist entry; try again later"
+                )
             track = self._track(item, position)
-            if track is not None:
-                tracks.append(track)
+            if track is None:
+                raise ProviderUnavailable("Spotify returned an unreadable playlist entry")
+            tracks.append(track)
         return ProviderPlaylist(
             provider_playlist_id=f"spotify:{payload['id']}",
             name=payload.get("name", ""),
@@ -204,10 +276,24 @@ class SpotifyProvider:
             if " - " in title:
                 left, right = title.split(" - ", 1)
                 title = left.strip('"“”') if left.lstrip().startswith(('"', "“")) else right
-        elif track.artists and cls._is_official_channel(track.artists[0]) and " - " in title:
-            title_artist, title = title.split(" - ", 1)
-            if title_artist.strip():
-                artists = (title_artist.strip(),)
+        elif " - " in title:
+            title_artist, possible_title = title.split(" - ", 1)
+            # Official upload channels commonly put ``Artist - Song`` in the
+            # title.  Artist-operated channels do the same, so do not depend
+            # solely on a fragile Topic/VEVO suffix.  Strip the prefix only
+            # when it agrees with the supplied artist to avoid changing a song
+            # title that merely contains a dash.
+            prefix_matches_artist = bool(
+                artists
+                and _compact(title_artist) == _compact(artists[0])
+                and _compact(title_artist)
+            )
+            if track.artists and (
+                cls._is_official_channel(track.artists[0]) or prefix_matches_artist
+            ):
+                title = possible_title
+                if title_artist.strip() and cls._is_official_channel(track.artists[0]):
+                    artists = (title_artist.strip(),)
 
         return ProviderTrack(
             provider_track_id=track.provider_track_id,
@@ -283,29 +369,93 @@ class SpotifyProvider:
                 score += 10.0
             elif difference > 15_000:
                 score -= 25.0
+        # Exact release metadata is strong positive evidence when two catalog
+        # recordings otherwise share a title, artist, and near-identical
+        # duration. Do not penalize a different album because compilations and
+        # reissues frequently contain the same ISRC.
+        if (
+            requested.album
+            and candidate.album
+            and _compact(requested.album) == _compact(candidate.album)
+        ):
+            score += 12.0
         if requested.explicit is not None and candidate.explicit is not None:
             score += 4.0 if requested.explicit == candidate.explicit else -35.0
         return score
 
+    @staticmethod
+    def _recording_key(candidate: ProviderTrack) -> tuple[str, ...]:
+        """Group equivalent Spotify catalogue listings before comparing scores.
+
+        Spotify search often returns the same recording from several albums or
+        editorial compilations.  Those entries are not an ambiguous choice for
+        playlist synchronization when they share an ISRC.
+        """
+
+        if candidate.isrc:
+            return ("isrc", candidate.isrc.casefold())
+        return (
+            "metadata",
+            _compact(candidate.title),
+            ",".join(sorted(_compact(artist) for artist in candidate.artists)),
+            str(candidate.duration_ms or ""),
+        )
+
     @classmethod
-    def _choose_search_candidate(
+    def _ranked_candidates(
         cls, requested: ProviderTrack, candidates: Sequence[ProviderTrack]
-    ) -> ProviderTrack | None:
-        scored = sorted(
+    ) -> tuple[tuple[float, ProviderTrack], ...]:
+        """Score and collapse duplicate Spotify catalogue entries."""
+
+        ranked = sorted(
             ((cls._search_score(requested, candidate), candidate) for candidate in candidates),
-            key=lambda item: item[0],
+            key=lambda item: (
+                item[0],
+                -abs((requested.duration_ms or 0) - (item[1].duration_ms or 0)),
+                item[1].provider_track_id,
+            ),
             reverse=True,
         )
+        unique: dict[tuple[str, ...], tuple[float, ProviderTrack]] = {}
+        for score, candidate in ranked:
+            unique.setdefault(cls._recording_key(candidate), (score, candidate))
+        return tuple(unique.values())
+
+    @classmethod
+    def _choose_search_candidate(
+        cls,
+        requested: ProviderTrack,
+        candidates: Sequence[ProviderTrack],
+        *,
+        explicit_preference: str = "no_preference",
+    ) -> ProviderTrack | None:
+        scored = cls._ranked_candidates(requested, candidates)
         if not scored or scored[0][0] < 80:
             return None
         if len(scored) > 1 and scored[0][0] - scored[1][0] < 8:
+            if requested.explicit is None and explicit_preference in {
+                "prefer_explicit",
+                "prefer_clean",
+            }:
+                preferred_rating = explicit_preference == "prefer_explicit"
+                preferred = next(
+                    (
+                        candidate
+                        for score, candidate in scored
+                        if scored[0][0] - score < 8 and candidate.explicit is preferred_rating
+                    ),
+                    None,
+                )
+                if preferred is not None:
+                    return preferred
             return None
         return scored[0][1]
 
-    def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
-        requested = self._search_metadata(track)
-        if requested is None:
-            return None
+    def _search_candidates(self, requested: ProviderTrack) -> tuple[ProviderTrack, ...]:
+        key = (requested.title, requested.artists, requested.album, requested.duration_ms)
+        cached = self._search_candidates_cache.get(key)
+        if cached is not None:
+            return cached
         query = " ".join(part for part in (requested.title, *requested.artists) if part)
         payload = self._request(
             "GET",
@@ -320,7 +470,49 @@ class SpotifyProvider:
             for item in payload.get("tracks", {}).get("items", [])
             if (candidate := self._track(item)) is not None
         )
-        return self._choose_search_candidate(requested, candidates)
+        self._search_candidates_cache[key] = candidates
+        return candidates
+
+    def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
+        requested = self._search_metadata(track)
+        if requested is None:
+            return None
+        return self._choose_search_candidate(requested, self._search_candidates(requested))
+
+    @classmethod
+    def resolve_search_candidates(
+        cls, track: ProviderTrack, candidates: Sequence[ProviderTrack]
+    ) -> ProviderTrack | None:
+        """Re-score an existing result set without spending another API request."""
+
+        requested = cls._search_metadata(track)
+        return cls._choose_search_candidate(requested, candidates) if requested else None
+
+    @classmethod
+    def resolve_explicit_preference(
+        cls, track: ProviderTrack, candidates: Sequence[ProviderTrack], preference: str
+    ) -> ProviderTrack | None:
+        """Break an otherwise-safe clean/explicit tie using the operator preference.
+
+        The preference is never applied when the source recording provides its
+        own rating, and it cannot outweigh the existing artist/version scoring.
+        """
+
+        requested = cls._search_metadata(track)
+        return (
+            cls._choose_search_candidate(requested, candidates, explicit_preference=preference)
+            if requested
+            else None
+        )
+
+    def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:
+        """Offer only plausible distinct Spotify recordings for human review."""
+
+        requested = self._search_metadata(track)
+        if requested is None:
+            return ()
+        scored = self._ranked_candidates(requested, self._search_candidates(requested))
+        return tuple(candidate for score, candidate in scored if score >= 70.0)[:5]
 
     def create_playlist(self, name: str, description: str | None = None) -> ProviderPlaylist:
         payload = self._request(

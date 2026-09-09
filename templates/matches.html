@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Saved matches{% endblock %}
+{% block content %}
+<section class="hero compact-hero"><div><p class="eyebrow">SAVED MATCHES</p><h1>Change a matched version.</h1><p class="lede">Choose the recording you want to replace. OPS searches for alternatives, then shows an explicit replacement review. Nothing changes until you apply it.</p></div></section>
+{% if error %}<div class="alert">{{ error }}</div>{% endif %}
+<p><a class="button ghost" href="/pairs">Back to playlists</a> <a class="button ghost" href="/pairs/{{ pair.id }}/matches">Refresh saved matches</a></p>
+<p class="muted-copy">These are the tracks from the last successful sync. Finish any pending sync first. A replacement adds the chosen version before removing the old entry; its position may move to the end of the playlist.</p>
+{% if groups %}
+<section class="card match-comparison">
+  <table class="match-table"><caption class="muted-copy">Matched recordings from the last successful sync</caption>
+    <thead><tr>{% for group in groups %}<th scope="col">{{ group.provider }}{% if not group.editable %}<span class="field-help">Read-only source</span>{% endif %}</th>{% endfor %}</tr></thead>
+    <tbody>{% for row in rows %}<tr>{% for track in row %}{% set group = groups[loop.index0] %}<td>
+      {% if track %}<strong>{{ track.title }}</strong><p class="muted-copy">{{ track.artists|join(', ') }}</p>
+      {% if group.editable %}<form method="post" action="/pairs/{{ pair.id }}/matches" data-loading-message="Finding alternative versions…"><input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="side" value="{{ group.side }}"><input type="hidden" name="track_id" value="{{ track.source_provider_track_id }}"><button class="button ghost" type="submit" aria-label="Change {{ track.title }} on {{ group.provider }}">Change version</button></form>{% endif %}
+      {% else %}<span class="field-help">No saved counterpart</span>{% endif %}
+    </td>{% endfor %}</tr>{% endfor %}</tbody>
+  </table>
+</section>
+{% elif not error %}<p>Complete the first sync to manage saved matches.</p>{% endif %}
+{% endblock %}

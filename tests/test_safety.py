@@ -23,16 +23,16 @@ def destructive_plan() -> ReconciliationPlan:
     )
 
 
-def test_destructive_plan_requires_exact_confirmation() -> None:
+def test_destructive_plan_requires_an_approval_for_the_exact_review() -> None:
     with pytest.raises(DestructiveActionApprovalError):
         validate_approval(destructive_plan(), None)
 
-    approval = Approval(plan_fingerprint(destructive_plan()), "APPLY DESTRUCTIVE CHANGES")
+    approval = Approval(plan_fingerprint(destructive_plan()), "")
     validate_approval(destructive_plan(), approval)
 
 
 def test_stale_approval_is_rejected() -> None:
-    approval = Approval("stale", "APPLY DESTRUCTIVE CHANGES")
+    approval = Approval("stale", "")
 
     with pytest.raises(DestructiveActionApprovalError, match="does not match"):
         validate_approval(destructive_plan(), approval)

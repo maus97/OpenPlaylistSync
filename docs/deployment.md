@@ -72,9 +72,11 @@ HTTPS mode.
 
 After the proxy is working, update Spotify's redirect address to the external
 HTTPS URL and reconnect Spotify from the OPS interface. Google device-code
-authorization does not use a callback address. OPS uses ytmusicapi for YouTube
-Music operations, so it does not require a YouTube Data API key or make YouTube
-Data API v3 playlist/search calls.
+authorization does not use a callback address. OPS uses the supported YouTube
+Data API v3 for authenticated channel, playlist, and playlist-item operations.
+Public catalogue searches use an unauthenticated ytmusicapi client to avoid
+spending the Data API's high-cost search quota. No separate YouTube Data API
+key is required; the configured Google OAuth client is used for the API calls.
 
 ## Backup and restore
 

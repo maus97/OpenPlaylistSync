@@ -1,5 +1,6 @@
 """FastAPI application entry point."""
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -24,7 +25,12 @@ from ops.security.middleware import (
     RuntimeSecurityMode,
     SecurityHeadersMiddleware,
 )
-from ops.storage.repositories import SyncPairRepository
+from ops.storage.repositories import SyncPairRepository, SyncRunRepository
+from ops.sync.automatic import (
+    authorization_retry_pending,
+    automation_binding,
+    run_automatic_pair,
+)
 from ops.sync.coordinator import SyncCoordinator
 
 
@@ -48,15 +54,32 @@ def _lifespan(base_settings: Settings, *, load_gui_settings: bool):
 
 
 def run_scheduled_sync() -> None:
-    """Create safe preview plans for enabled pairs; never apply writes automatically."""
+    """Preview by default; apply only for explicitly opted-in playlist pairs."""
 
     with SessionLocal() as session:
         settings = load_app_settings(session)
-        if not settings.credential_encryption_key:
+        if not settings.scheduler_enabled or not settings.credential_encryption_key:
             return
         coordinator = SyncCoordinator(session, settings, create_provider)
         for pair in SyncPairRepository(session).get_enabled():
-            coordinator.preview(pair)
+            latest = SyncRunRepository(session).latest_for_pair(pair.id)
+            if authorization_retry_pending(latest):
+                logging.getLogger(__name__).info(
+                    "Scheduled pair %s is waiting for its authorization retry", pair.id
+                )
+                continue
+            try:
+                if automation_binding(pair) in settings.automatic_sync_bindings:
+                    outcome = run_automatic_pair(coordinator, pair)
+                    logging.getLogger(__name__).info("Scheduled pair %s: %s", pair.id, outcome)
+                else:
+                    coordinator.preview(pair)
+            except Exception as exc:
+                session.rollback()
+                # Provider exception messages can contain sensitive response data.
+                logging.getLogger(__name__).warning(
+                    "Scheduled pair %s needs attention (%s)", pair.id, type(exc).__name__
+                )
 
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:

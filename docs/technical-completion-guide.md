@@ -187,18 +187,20 @@ allowlisting must also be explained in the GUI setup guide.
 
 ### YouTube Music
 
-1. Keep ytmusicapi calls inside the provider adapter; use `filter="songs"` for
-   catalogue matching and an unauthenticated catalogue client where possible.
-2. Store `videoId` and `setVideoId` for every occurrence; delete by both values
-   and test duplicate removals explicitly.
-3. Use `get_library_playlists(limit=None)` and `get_playlist(limit=None)` so
-   the adapter requests complete library snapshots.
+1. Keep provider-specific calls inside the adapter; use an unauthenticated
+   ytmusicapi client with `filter="songs"` for catalogue matching and the
+   supported YouTube Data API for authenticated library operations.
+2. Store `videoId` and the Data API playlist-item ID for every occurrence;
+   delete by the exact item ID and test duplicate removals explicitly.
+3. Page `playlists`, `playlistItems`, and `videos` until all library data is
+   read; never assume the embedded first page is complete.
 4. Batch mutations, preserve duplicates intentionally, and never retry a write
    merely because a response is uncertain.
-5. Keep ytmusicapi clients injectable and test synthetic responses for
-   authentication, rate limits, temporary failures, and malformed metadata.
+5. Keep both the catalogue and official API clients injectable and test
+   synthetic responses for authentication, rate limits, temporary failures,
+   and malformed metadata.
 6. Refresh encrypted Google OAuth tokens before they expire and require a clean
-   reconnect for legacy official-API token records or failed refreshes.
+   reconnect for legacy token records or failed refreshes.
 
 ### Shared provider behavior
 
@@ -408,9 +410,10 @@ phase:
   resume rules.
 - **ADR-006 — Deployment threat model:** local-only default, authentication,
   reverse proxy, TLS, and secret storage expectations.
-- **ADR-007 — YouTube Music integration boundary:** ytmusicapi compatibility,
-  OAuth token handling, request minimisation, and the risk that YouTube changes
-  its unofficial internal interface.
+- **ADR-007 — YouTube Music integration boundary:** official Data API playlist
+  operations, unauthenticated ytmusicapi catalogue matching, OAuth token
+  handling, request minimisation, and the risk that YouTube changes either
+  provider surface.
 - **ADR-008 — Persistence scale:** JSON snapshots versus normalized occurrence
   tables, retention, and expected playlist limits.
 

@@ -46,7 +46,7 @@ flowchart TD
     sync --> reconcile["Three-way reconciliation"]
     sync --> provider["Provider interface"]
     provider --> spotify["Spotify adapter"]
-    provider --> youtube["YTMusicApiProvider / ytmusicapi"]
+    provider --> youtube["YouTube Music adapter / Data API + ytmusicapi search"]
     app --> storage["SQLAlchemy repositories"]
     storage --> sqlite["SQLite"]
     secrets["Separate secret volume"] --> credential["Credential encryption boundary"]
@@ -80,15 +80,15 @@ provider-specific playlist and track representations into the neutral domain
 types. HTTP clients and authentication details stay here. The adapter boundary
 must accept injected clients or transport fakes.
 
-The YouTube Music adapter is `YTMusicApiProvider`. It isolates ytmusicapi and
-its unofficial YouTube Music transport behind the common provider contract.
-Catalogue song searches use a separate unauthenticated client; library reads
-and writes use ytmusicapi's OAuth token dictionary, loaded only from OPS's
-encrypted credential store. No ytmusicapi `oauth.json` file is created.
-For account identity, OPS prefers the channel handle returned by ytmusicapi. If
-an account has no handle, it uses a short digest of the returned account name
-and avatar URL; missing fallback fields fail closed instead of guessing an
-identity or storing profile data as the account key.
+The YouTube Music adapter is `YTMusicApiProvider`. It keeps public catalogue
+searches on a separate unauthenticated ytmusicapi client, while authenticated
+account, playlist, and track-list operations use the supported YouTube Data API
+v3 with the encrypted Google OAuth access token. YouTube Music's private
+InnerTube endpoint currently rejects OAuth Bearer tokens with HTTP 400, so OPS
+does not use its authenticated ytmusicapi path. No ytmusicapi `oauth.json` file
+is created. Account identity uses the stable Data API channel ID; the legacy
+injected ytmusicapi seam still has a privacy-preserving metadata/token fallback
+for tests and older integrations. No token value is stored as the account key.
 
 A review is initiated by a CSRF-protected POST, bounded in size/provider
 lookups, and persisted with the complete ordered source and target state hashes.
@@ -261,6 +261,49 @@ allowlists.
 - CI will run formatting, linting, and the full test suite on Python 3.12.
 - The container image is built in a separate CI job.
 
+## Recording identity during review
+
+Before remote search, the coordinator reuses the destination playlist as a
+candidate set under the provider's normal recording/version matching rules.
+When a resolved recording is already present with a different canonical key,
+OPS records the verified cross-provider equivalence and rebuilds reconciliation.
+Only exact destination IDs or matching ISRCs establish this equivalence; raw
+title similarity alone never merges identities. Real occurrence-count gaps
+remain additions, so intentional duplicate occurrences are preserved.
+
+Verified aliases are also applied to an in-memory reading of the immutable
+baseline. The persisted baseline is never rewritten during review. This avoids
+turning an identity correction into a phantom removal or a returning addition.
+Apply checks all pending mapping identities before any provider write and rejects
+older reviews that would add an already-present recording under a different key.
+Failed initial runs with excess receiving-side copies pause recovery review
+instead of automatically propagating those copies.
+
+After an accepted addition, a provider playlist listing can briefly be stale.
+OPS retains that exact acknowledged provider recording in the next baseline only
+when the immediate re-read has omitted it. The verified provider-ID mapping then
+recognizes the occurrence when it becomes visible. This prevents an eventual
+listing from being misclassified as a new reverse-direction addition. It does
+not merge distinct recordings or discard intentional duplicate occurrences.
+
+## Opt-in automatic synchronization
+
+Scheduling defaults to disabled; enabled pairs remain preview-only unless the
+operator explicitly opts them into automatic additions and removals in Settings.
+Consent is an encrypted configuration binding to the pair creation time, account
+IDs and playlist IDs, not just a reusable numeric pair ID. No schema change is
+required. Source and target are labels, not permanent authority: later changes
+reconcile bidirectionally against the successful baseline.
+
+Automatic work uses normal prepare/apply, one-time plan tokens, pair leases,
+state-hash revalidation, strict resolution, occurrence guards, and action journals.
+First sync and baseline upgrades remain manual. Unresolved matches/conflicts
+block the whole automatic apply. Uncertain writes since the last baseline require
+manual recovery rather than blind retries. Per-side removals exceeding 10 tracks
+or 25% of the baseline (one-track minimum), and removals emptying a side, require
+manual review. Failures on one pair do not stop checks for other pairs. The
+Activity review and sanitized scheduler logs provide investigation evidence.
+
 ## Decisions requiring future attention
 
 1. **Credential key rotation and recovery:** Fernet authenticated encryption is
@@ -278,6 +321,6 @@ allowlists.
    removals and asks the operator to resolve the occurrence manually.
 6. **Baseline storage scale:** validate JSON snapshots with realistic playlist
    sizes before committing to normalized tables or a hybrid schema.
-7. **Scheduler behavior:** the lifecycle and single-instance preview tick are
-   implemented; define durable job state, retries, backoff, and recovery after
-   process restarts.
+7. **Scheduler behavior:** opt-in automatic ticks and fail-closed recovery are
+   implemented; durable notifications and adaptive provider backoff remain future
+   improvements. OPS must stay running for scheduled checks to happen.

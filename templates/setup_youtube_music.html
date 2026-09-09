@@ -24,6 +24,16 @@
 
   <div class="guide-step">
     <div class="guide-number guide-number-pink">2</div>
+    <h2>Enable YouTube Data API v3</h2>
+    <ol class="setup-list">
+      <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/library/youtube.googleapis.com" target="_blank" rel="noreferrer">YouTube Data API v3 in the API Library ↗</a> and check that your OPS project is selected.</li>
+      <li>Choose <strong>Enable</strong>. If the page shows <strong>Manage</strong>, it is already enabled.</li>
+    </ol>
+    <p class="field-help">OPS needs this API to read your account and playlists and apply approved changes. You do not need to create an API key.</p>
+  </div>
+
+  <div class="guide-step">
+    <div class="guide-number guide-number-pink">3</div>
     <h2>Configure the OAuth consent screen</h2>
     <ol class="setup-list">
       <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/credentials/consent" target="_blank" rel="noreferrer">Google Auth Platform / OAuth consent screen ↗</a> for the project.</li>
@@ -35,7 +45,7 @@
   </div>
 
   <div class="guide-step">
-    <div class="guide-number guide-number-pink">3</div>
+    <div class="guide-number guide-number-pink">4</div>
     <h2>Create the OAuth client</h2>
     <ol class="setup-list">
       <li>Open <a class="text-link" href="https://console.cloud.google.com/apis/credentials" target="_blank" rel="noreferrer">Credentials ↗</a>, or choose <strong>Google Auth Platform → Clients</strong> in the newer console.</li>
@@ -46,20 +56,22 @@
   </div>
 
   <div class="guide-step">
-    <div class="guide-number guide-number-pink">4</div>
+    <div class="guide-number guide-number-pink">5</div>
     <h2>Approve YouTube Music in OPS</h2>
     <ol class="setup-list">
       <li>Open <a class="text-link" href="/pairs">Playlists</a> and choose <strong>Connect YouTube Music</strong>.</li>
       <li>OPS will show a Google verification URL and one-time code. Open the URL on a device with a browser, enter the code, select the same Google account, and approve the YouTube permission.</li>
       <li>Return to OPS and choose <strong>I completed authorization</strong>. OPS will then load your playlists.</li>
     </ol>
-    <p class="field-help">OPS requests <code>https://www.googleapis.com/auth/youtube</code> for its encrypted device authorization. It uses <code>ytmusicapi</code> for YouTube Music catalogue and playlist operations, not YouTube Data API v3. It never receives your Google password.</p>
+    <p class="field-help">OPS requests YouTube account access to read and update playlists. Authorization tokens are encrypted, and OPS never receives your Google password.</p>
   </div>
 </section>
 
 <section class="card guide-page">
-  <h2>Important compatibility note</h2>
-  <p class="muted-copy">ytmusicapi uses YouTube Music's unofficial internal interface. It gives OPS song-focused matching and avoids Data API quota for playlist work, but a YouTube change can require an OPS update or a new connection. Do not create a Google API key for OPS.</p>
+  <h2>Usage limits and troubleshooting</h2>
+  <p class="muted-copy">OPS searches the YouTube Music catalogue through ytmusicapi. Playlist reads and changes use YouTube Data API v3 and count toward your Google project's quota. Large first syncs can reach that limit; reconnecting your account does not reset it.</p>
+  <p class="muted-copy">Check your project's usage under <a class="text-link" href="https://console.cloud.google.com/apis/api/youtube.googleapis.com/quotas" target="_blank" rel="noreferrer">YouTube Data API quotas ↗</a>. Daily quotas reset at midnight Pacific time. Google's <a class="text-link" href="https://developers.google.com/youtube/v3/determine_quota_cost" target="_blank" rel="noreferrer">quota guide ↗</a> explains the current limits.</p>
+  <p class="field-help">If connection fails, check that the API is enabled in the same project as your OAuth client and that your Google account is listed as a test user. Catalogue changes at YouTube Music can occasionally require an OPS update.</p>
 </section>
 
 <div class="hero-actions"><a class="button primary" href="/settings">Back to Settings</a><a class="button ghost" href="/setup/spotify">Spotify guide</a></div>

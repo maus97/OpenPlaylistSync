@@ -109,7 +109,11 @@ class SecurityHeadersMiddleware:
         "base-uri 'none'; "
         "object-src 'none'; "
         "frame-ancestors 'none'; "
-        "form-action 'self'; "
+        # Spotify's authorization-code flow starts with a same-origin POST,
+        # then follows its 303 redirect to the provider.  Keep form posts
+        # restricted to OPS while allowing that explicit OAuth destination;
+        # without it, browsers silently block the redirect after the POST.
+        "form-action 'self' https://accounts.spotify.com; "
         "script-src 'self'; "
         "style-src 'self'; "
         "img-src 'self' data:; "

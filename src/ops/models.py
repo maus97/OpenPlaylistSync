@@ -86,6 +86,7 @@ class SyncPair(Base):
     )
     source_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
     target_playlist_id: Mapped[str] = mapped_column(String(255), nullable=False)
+    sync_mode: Mapped[str] = mapped_column(String(32), default="two_way", nullable=False)
     initial_sync_policy: Mapped[str] = mapped_column(String(32), default="merge", nullable=False)
     enabled: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     operation_lock_token: Mapped[str | None] = mapped_column(String(128), nullable=True)

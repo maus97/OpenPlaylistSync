@@ -71,6 +71,7 @@ class SyncExecutor:
         target_snapshot_id: str | None = None,
         approval: Approval | None = None,
         skip_unresolved: bool = False,
+        fail_on_unavailable: bool = False,
         pre_resolved_tracks: Mapping[int, ProviderTrack] | None = None,
         on_action_completed: Callable[[int], None] | None = None,
         on_track_resolved: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
@@ -107,6 +108,10 @@ class SyncExecutor:
                 try:
                     new_snapshot = provider.add_tracks(playlist_id, [provider_track])
                 except TrackUnavailable:
+                    if fail_on_unavailable:
+                        raise PlanExecutionError(
+                            "Replacement unavailable; the previous recording was not removed"
+                        ) from None
                     # A provider can reject a video after review because of a
                     # regional or rights restriction. Continue with the other
                     # reviewed additions, but never advance the baseline.

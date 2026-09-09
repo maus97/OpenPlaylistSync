@@ -15,16 +15,26 @@ from sqlalchemy.orm import Session, sessionmaker
 from ops import main as main_module
 from ops.api import routes
 from ops.config import Settings
-from ops.configuration import load_app_settings, load_saved_settings
+from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import Base, build_engine, get_db
 from ops.main import create_app
-from ops.models import LocalAdministrator, ProviderAccount, ProviderSearchCache, SyncPair
+from ops.models import (
+    LocalAdministrator,
+    ProviderAccount,
+    ProviderSearchCache,
+    SyncBaseline,
+    SyncPair,
+    SyncRun,
+)
+from ops.providers.types import ProviderTrack
 from ops.security import middleware as authentication_middleware
 from ops.security.bootstrap import bootstrap_token, consume_bootstrap_token, verify_bootstrap_token
 from ops.security.crypto import CredentialCipher
 from ops.security.logging import SensitiveQueryFilter, redact_query
 from ops.security.network import client_address
 from ops.storage.repositories import ProviderAccountRepository
+from ops.sync.domain import ActionType, ReconciliationAction, ReconciliationPlan, Side, TrackState
+from ops.sync.serialization import encode_plan
 
 
 def _csrf(response_text: str) -> str:
@@ -89,6 +99,230 @@ def _complete_setup(client: TestClient, settings: Settings) -> str:
     return csrf
 
 
+def test_playlist_page_survives_expired_google_refresh(tmp_path, monkeypatch):
+    from ops.auth.youtube_music import YouTubeMusicOAuthError
+
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            account = ProviderAccount(
+                provider_name="youtube_music", external_account_id="synthetic"
+            )
+            session.add(account)
+            session.flush()
+            ProviderAccountRepository(
+                session, CredentialCipher(settings.credential_encryption_key)
+            ).save_credentials(account, {"access_token": "synthetic-expired-token"})
+            session.commit()
+
+        def expired(*args):
+            raise YouTubeMusicOAuthError(
+                "Google authorization expired; start the connection again."
+            )
+
+        monkeypatch.setattr(routes, "provider_for_account", expired)
+        monkeypatch.setattr(routes, "load_app_settings", lambda _: settings)
+        response = client.get("/pairs")
+        assert response.status_code == 200
+        assert "Google authorization expired" in response.text
+        assert "Connect YouTube Music" in response.text
+        assert "Connection needs attention" in response.text
+
+
+def test_automatic_settings_preserve_secrets_and_require_csrf(tmp_path, monkeypatch):
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            save_app_settings(session, {"spotify_client_secret": "synthetic-secret"}, settings)
+            accounts = [
+                ProviderAccount(provider_name=n, external_account_id=n)
+                for n in ("spotify", "youtube_music")
+            ]
+            session.add_all(accounts)
+            session.flush()
+            pair = SyncPair(
+                source_account_id=accounts[0].id,
+                target_account_id=accounts[1].id,
+                source_playlist_id="spotify:test",
+                target_playlist_id="youtube_music:test",
+            )
+            session.add(pair)
+            session.commit()
+            pair_id = pair.id
+        assert client.post("/settings/automation", data={"pair_ids": pair_id}).status_code == 403
+        csrf = _csrf(client.get("/settings").text)
+        response = client.post(
+            "/settings/automation",
+            data={"csrf_token": csrf, "pair_ids": pair_id},
+            follow_redirects=False,
+        )
+        assert response.status_code == 303
+        with factory() as session:
+            saved = load_saved_settings(session, settings)
+            assert saved["spotify_client_secret"] == "synthetic-secret"
+            assert len(saved["automatic_sync_bindings"]) == 1
+        assert (
+            client.post(
+                "/settings/automation",
+                data={"csrf_token": csrf, "pair_ids": 999},
+                follow_redirects=False,
+            ).status_code
+            == 400
+        )
+        response = client.post(
+            "/settings/automation", data={"csrf_token": csrf}, follow_redirects=False
+        )
+        assert response.status_code == 303
+        with factory() as session:
+            saved = load_saved_settings(session, settings)
+            assert saved["automatic_sync_bindings"] == []
+            assert saved["spotify_client_secret"] == "synthetic-secret"
+
+
+def test_activity_shows_the_reviewed_change_details(tmp_path, monkeypatch):
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            spotify = ProviderAccount(provider_name="spotify", external_account_id="spotify")
+            youtube = ProviderAccount(provider_name="youtube_music", external_account_id="youtube")
+            session.add_all((spotify, youtube))
+            session.flush()
+            pair = SyncPair(
+                source_account_id=spotify.id,
+                target_account_id=youtube.id,
+                source_playlist_id="spotify:test",
+                target_playlist_id="youtube_music:test",
+            )
+            session.add(pair)
+            session.flush()
+            plan = ReconciliationPlan(
+                actions=(
+                    ReconciliationAction(
+                        Side.TARGET,
+                        ActionType.ADD_TRACK,
+                        TrackState(
+                            "text:afterglow|ed sheeran", "Afterglow", ("Ed Sheeran",), "spotify:one"
+                        ),
+                        "test",
+                    ),
+                ),
+                conflicts=(),
+            )
+            session.add(SyncRun(pair_id=pair.id, status="applied", plan_json=encode_plan(plan)))
+            session.commit()
+        response = client.get("/runs")
+        assert response.status_code == 200
+        assert "Added to YouTube Music" in response.text
+        assert "Afterglow" in response.text
+
+
+def test_activity_hides_no_change_scheduled_previews(tmp_path, monkeypatch):
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            session.add(
+                SyncRun(status="planned", plan_json=encode_plan(ReconciliationPlan((), ())))
+            )
+            session.add(SyncRun(status="review_failed"))
+            session.commit()
+        response = client.get("/runs")
+        assert "<td>#1</td>" not in response.text
+        assert "Review Failed" in response.text
+
+
+def test_replacing_an_existing_baseline_is_csrf_protected(tmp_path, monkeypatch):
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    accepted_pair_ids: list[int] = []
+
+    class Coordinator:
+        def __init__(self, *_args) -> None:
+            pass
+
+        def accept_current_state(self, pair: SyncPair) -> None:
+            accepted_pair_ids.append(pair.id)
+
+    monkeypatch.setattr(routes, "SyncCoordinator", Coordinator)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            spotify = ProviderAccount(provider_name="spotify", external_account_id="spotify")
+            youtube = ProviderAccount(provider_name="youtube_music", external_account_id="youtube")
+            session.add_all((spotify, youtube))
+            session.flush()
+            pair = SyncPair(
+                source_account_id=spotify.id,
+                target_account_id=youtube.id,
+                source_playlist_id="spotify:test",
+                target_playlist_id="youtube_music:test",
+            )
+            session.add(pair)
+            session.flush()
+            session.add(
+                SyncBaseline(
+                    pair_id=pair.id,
+                    account_id=spotify.id,
+                    playlist_key="spotify:test",
+                    source_provider="spotify",
+                    target_provider="youtube_music",
+                    snapshot_json="{}",
+                    synchronized_at=datetime.now(UTC),
+                )
+            )
+            session.commit()
+            pair_id = pair.id
+        csrf = _csrf(client.get("/pairs").text)
+        accepted = client.post(
+            f"/sync/baseline/{pair_id}",
+            data={"csrf_token": csrf},
+            follow_redirects=False,
+        )
+        assert accepted.status_code == 303
+        assert accepted_pair_ids == [pair_id]
+
+
+def test_candidate_picker_labels_clean_and_explicit_recordings() -> None:
+    action = SimpleNamespace(track=SimpleNamespace(title="Peaches", artists=("Justin Bieber",)))
+    choice = SimpleNamespace(
+        action=action,
+        action_index=0,
+        candidates=(
+            ProviderTrack(
+                "spotify:explicit",
+                "Peaches (feat. Daniel Caesar & Giveon)",
+                ("Justin Bieber", "Daniel Caesar", "GIV\u0112ON"),
+                album="Justice",
+                explicit=True,
+            ),
+            ProviderTrack(
+                "spotify:clean",
+                "Peaches (feat. Daniel Caesar & Giveon)",
+                ("Justin Bieber", "Daniel Caesar", "GIV\u0112ON"),
+                album="Justice",
+                explicit=False,
+            ),
+        ),
+    )
+    rendered = routes.templates.get_template("sync_plan.html").render(
+        request=SimpleNamespace(session={"local_admin_authenticated": True}),
+        csrf_token="test-csrf",
+        error=None,
+        plan=ReconciliationPlan((), ()),
+        review=SimpleNamespace(baseline_upgrade_required=False, review_id=1),
+        pair=SimpleNamespace(id=1),
+        candidate_options=(choice,),
+        unresolved_tracks=(),
+        fingerprint="",
+        approval_token="",
+    )
+
+    assert "Justice · Explicit" in rendered
+    assert "Justice · Clean" in rendered
+
+
 def test_privileged_routes_require_authentication_and_setup_token(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -141,6 +375,10 @@ def test_security_headers_trusted_host_secure_cookie_and_body_limit(
     assert "httponly" in cookie
     assert "samesite=lax" in cookie
     assert response.headers["content-security-policy"].startswith("default-src 'self'")
+    assert (
+        "form-action 'self' https://accounts.spotify.com"
+        in response.headers["content-security-policy"]
+    )
     assert response.headers["x-frame-options"] == "DENY"
     assert response.headers["x-content-type-options"] == "nosniff"
     assert response.headers["referrer-policy"] == "same-origin"
@@ -276,6 +514,18 @@ def test_review_and_oauth_initiation_are_csrf_protected_posts(
     assert selected.status_code == 303
     assert selected.headers["location"] == f"/sync/plan/{pair_id}?review_id=9"
     assert calls["select"] == 1
+
+    def conflicting_review(self, _pair):
+        raise routes.TrackMappingConflict("Conflicting recording <script>unsafe</script>")
+
+    monkeypatch.setattr(FakeCoordinator, "prepare_review", conflicting_review)
+    rejected = client.post(f"/sync/plan/{pair_id}", data={"csrf_token": csrf})
+    assert rejected.status_code == 409
+    assert "text/html" in rejected.headers["content-type"]
+    assert "Back to playlists" in rejected.text
+    assert "&lt;script&gt;unsafe&lt;/script&gt;" in rejected.text
+    assert "<script>unsafe</script>" not in rejected.text
+    assert "Apply changes" not in rejected.text
 
 
 def test_ytmusicapi_reconnects_one_legacy_account_and_pauses_its_pairs(

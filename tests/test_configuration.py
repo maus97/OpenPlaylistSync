@@ -42,6 +42,7 @@ def test_gui_settings_are_encrypted_and_override_defaults() -> None:
                 "spotify_client_id": "gui-id",
                 "spotify_client_secret": "gui-secret",
                 "session_cookie_secure": True,
+                "explicit_preference": "prefer_clean",
             },
             base,
         )
@@ -54,9 +55,11 @@ def test_gui_settings_are_encrypted_and_override_defaults() -> None:
             "spotify_client_id": "gui-id",
             "spotify_client_secret": "gui-secret",
             "session_cookie_secure": True,
+            "explicit_preference": "prefer_clean",
         }
         assert load_app_settings(session, base).spotify_client_id == "gui-id"
         assert load_app_settings(session, base).https_mode_enabled is True
+        assert load_app_settings(session, base).explicit_preference == "prefer_clean"
 
         deployment_override = Settings(
             credential_encryption_key=base.credential_encryption_key,

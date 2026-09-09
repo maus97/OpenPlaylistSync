@@ -168,29 +168,32 @@ and [playlist scopes](https://developer.spotify.com/documentation/web-api/concep
 
 1. In [Google Cloud Console](https://console.cloud.google.com/projectcreate),
    create or select a project.
-2. In [Credentials](https://console.cloud.google.com/apis/credentials), create
+2. Enable [YouTube Data API v3](https://console.cloud.google.com/apis/library/youtube.googleapis.com)
+   in that project so OPS can read and update playlists.
+3. Configure the OAuth consent screen and add your Google account as a test user
+   if the app is in Testing mode.
+4. In [Credentials](https://console.cloud.google.com/apis/credentials), create
    an OAuth client ID and choose **TVs and Limited Input devices**.
-3. Copy the client ID and secret into OPS Settings and save.
-4. Open Pairs and choose **Connect YouTube Music**. OPS will show a Google
+5. Copy the client ID and secret into OPS Settings and save.
+6. Open Pairs and choose **Connect YouTube Music**. OPS will show a Google
    verification URL and one-time code. Complete the approval, return to OPS,
    and choose **I completed authorization**.
 
 OPS uses ytmusicapi's Google device-authorization flow with
-`https://www.googleapis.com/auth/youtube`. Playlist discovery, song matching,
-creation, additions, removals, and metadata updates go through the YouTube
-Music interface exposed by [ytmusicapi](https://ytmusicapi.readthedocs.io/),
-not YouTube Data API v3. A Google OAuth client is still required, but OPS does
-not need a YouTube Data API key or use Data API playlist/search quota.
+`https://www.googleapis.com/auth/youtube`. Authenticated account, playlist,
+track-list, and playlist-write operations use the supported YouTube Data API
+v3 with that OAuth token. Public song catalogue searches use an unauthenticated
+[ytmusicapi](https://ytmusicapi.readthedocs.io/) client so ordinary matching does
+not spend the Data API's expensive search quota. A Google OAuth client is still
+required; no separate Data API key is needed.
 
-ytmusicapi uses an unofficial YouTube Music interface. It improves song-focused
-matching, but YouTube changes can require an OPS update or a new authorization.
-OPS stores the refreshable OAuth token only as encrypted application data; it
-does not create an `oauth.json` file. Existing YouTube Music connections from
-the former Data API adapter must be reconnected after this upgrade. When there
-is one legacy connection, OPS preserves its pair references, replaces the
-encrypted token, and pauses those pairs. Review the new provider view and save
-a fresh baseline before applying further changes. If you already disconnected
-multiple old YouTube accounts, create or repair their pairs manually.
+YouTube Music's private InnerTube endpoint currently rejects OAuth Bearer
+tokens with HTTP 400, so OPS does not use ytmusicapi's authenticated library
+path. ytmusicapi remains an unofficial catalogue interface and YouTube changes
+can require an OPS update. OPS stores the refreshable OAuth token only as
+encrypted application data; it does not create an `oauth.json` file. Existing
+connections from the older Data API adapter can continue using the same OAuth
+token shape; reconnect only when the UI reports an expired or invalid token.
 
 ## License
 

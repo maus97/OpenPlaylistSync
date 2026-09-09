@@ -18,7 +18,9 @@ GUI_SETTING_KEYS = frozenset(
         "ytmusic_client_secret",
         "session_cookie_secure",
         "scheduler_enabled",
+        "automatic_sync_bindings",
         "sync_interval_minutes",
+        "explicit_preference",
     }
 )
 

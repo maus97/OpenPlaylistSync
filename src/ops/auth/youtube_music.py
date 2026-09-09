@@ -1,8 +1,8 @@
-"""ytmusicapi OAuth device-flow boundary for YouTube Music.
+"""Google device-flow boundary for YouTube Music.
 
 Only normalized token dictionaries leave this module. OPS encrypts those
-dictionaries in its existing provider-account record; it never asks
-ytmusicapi to create a plaintext ``oauth.json`` file.
+dictionaries in its existing provider-account record and never creates a
+plaintext ``oauth.json`` file.
 """
 
 from __future__ import annotations
@@ -15,17 +15,19 @@ import requests
 from ytmusicapi.auth.oauth import OAuthCredentials
 from ytmusicapi.exceptions import YTMusicError
 
+from ops.providers.base import ProviderError
+
 YOUTUBE_MUSIC_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
 YOUTUBE_MUSIC_AUTH_SCHEME = "ytmusicapi_oauth"
 TOKEN_REFRESH_SKEW_SECONDS = 300
 
 
-class YouTubeMusicOAuthError(RuntimeError):
+class YouTubeMusicOAuthError(ProviderError):
     """A sanitized device-flow failure safe to display to the administrator."""
 
 
 class OAuthCredentialsClient(Protocol):
-    """Small injectable ytmusicapi OAuth surface used by OPS."""
+    """Small injectable OAuth surface used by OPS."""
 
     def get_code(self) -> Mapping[str, Any]: ...
 
@@ -56,7 +58,7 @@ def normalize_oauth_token(
     previous_refresh_token: str | None = None,
     now: int | None = None,
 ) -> dict[str, Any]:
-    """Return the exact refreshable token shape ytmusicapi accepts in memory."""
+    """Return the refreshable token shape used by the provider adapters."""
 
     if payload.get("error") or not isinstance(payload.get("access_token"), str):
         raise _safe_oauth_error(payload)
@@ -101,7 +103,7 @@ def oauth_token_needs_refresh(credentials: Mapping[str, Any], *, now: int | None
 
 
 class YouTubeMusicAuthService:
-    """Use ytmusicapi's supported device OAuth helper without exposing errors."""
+    """Use Google's device OAuth helper without exposing provider errors."""
 
     def __init__(
         self,
