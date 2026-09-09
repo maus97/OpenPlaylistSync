@@ -1,26 +1,33 @@
 """HTTP routes for health, operator flows, and the safety-first UI."""
 
+import logging
 import os
 import secrets
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlencode
 
 from fastapi import APIRouter, Depends, Form, HTTPException, Request, status
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
-from ops.auth.youtube_music import YouTubeMusicAuthService, YouTubeMusicOAuthError
+from ops.auth.youtube_music import (
+    YOUTUBE_MUSIC_AUTH_SCHEME,
+    YouTubeMusicAuthService,
+    YouTubeMusicOAuthError,
+    oauth_token_needs_refresh,
+)
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
 from ops.db import get_db
 from ops.models import (
     LocalAdministrator,
     ProviderAccount,
+    ProviderSearchCache,
     ProviderTrackMapping,
     SyncAction,
     SyncBaseline,
@@ -29,7 +36,7 @@ from ops.models import (
 )
 from ops.providers.base import ProviderError
 from ops.providers.factory import create_provider
-from ops.providers.youtube_music import YouTubeMusicProvider
+from ops.providers.youtube_music import YTMusicApiProvider
 from ops.security.bootstrap import (
     BootstrapAuthorizationError,
     consume_bootstrap_token,
@@ -52,22 +59,27 @@ from ops.security.local_auth import (
 from ops.security.network import client_address
 from ops.storage.repositories import (
     ProviderAccountRepository,
+    SyncBaselineRepository,
     SyncPairRepository,
     SyncRunRepository,
 )
+from ops.sync.automatic import automation_binding
 from ops.sync.coordinator import (
     AmbiguousSpotifyRemoval,
+    PartialSyncRecoveryRequired,
     ReviewExpired,
     ReviewNotApplicable,
     SyncCoordinator,
     TrackMappingConflict,
 )
-from ops.sync.domain import InitialSyncPolicy
+from ops.sync.domain import InitialSyncPolicy, Side, SyncMode
 from ops.sync.executor import PlanExecutionError
-from ops.sync.leases import PairOperationBusy
+from ops.sync.leases import PairOperationBusy, acquire_pair_lease
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
+from ops.sync.serialization import decode_baseline, decode_plan
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
 SUPPORTED_PROVIDERS = frozenset({"spotify", "youtube_music"})
 NEW_PLAYLIST_PREFIX = "new:"
 templates = Jinja2Templates(
@@ -259,6 +271,13 @@ def provider_for_account(session: Session, app_settings: Settings, account: Prov
         credentials = _refresh_youtube_music_credentials(
             session, app_settings, account, credentials
         )
+        if not app_settings.ytmusic_client_id or not app_settings.ytmusic_client_secret:
+            raise ValueError("YouTube Music OAuth settings are incomplete")
+        credentials = {
+            **credentials,
+            "_ytmusic_client_id": app_settings.ytmusic_client_id,
+            "_ytmusic_client_secret": app_settings.ytmusic_client_secret,
+        }
     return create_provider(account, credentials)
 
 
@@ -268,16 +287,11 @@ def _refresh_youtube_music_credentials(
     account: ProviderAccount,
     credentials: dict[str, Any],
 ) -> dict[str, Any]:
-    """Refresh an expired Google OAuth token before a YouTube Data API request."""
+    """Refresh OPS's encrypted Google token before YouTube API operations."""
 
-    expires_at = credentials.get("expires_at")
-    try:
-        expired = not expires_at or datetime.fromisoformat(str(expires_at)).astimezone(
-            UTC
-        ) <= datetime.now(UTC)
-    except ValueError:
-        expired = True
-    if not expired:
+    if credentials.get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME:
+        raise ValueError("YouTube Music needs to be reconnected for the current OAuth integration")
+    if not oauth_token_needs_refresh(credentials):
         return credentials
     refresh_token = credentials.get("refresh_token")
     if (
@@ -293,9 +307,6 @@ def _refresh_youtube_music_credentials(
         **credentials,
         **refreshed,
         "refresh_token": refreshed.get("refresh_token", refresh_token),
-        "expires_at": (
-            datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
-        ).isoformat(),
     }
     ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key or "")
@@ -347,6 +358,28 @@ def about_page(request: Request) -> HTMLResponse:
     return templates.TemplateResponse(request=request, name="about.html")
 
 
+def automation_choices(session: Session, app_settings: Settings) -> list[dict[str, Any]]:
+    choices = []
+    for pair in SyncPairRepository(session).all():
+        baseline = SyncBaselineRepository(session).latest_for_pair(pair.id)
+        name = f"Pair {pair.id} (first sync required)"
+        if baseline is not None:
+            snapshot = decode_baseline(baseline.snapshot_json)
+            arrow = "→" if pair.sync_mode == SyncMode.SOURCE_TO_TARGET.value else "↔"
+            name = f"{snapshot.source.name} {arrow} {snapshot.target.name} (pair {pair.id})"
+        choices.append(
+            {
+                "id": pair.id,
+                "name": name,
+                "active": automation_binding(pair) in app_settings.automatic_sync_bindings,
+                "direction": "Source controls target"
+                if pair.sync_mode == SyncMode.SOURCE_TO_TARGET.value
+                else "Two-way",
+            }
+        )
+    return choices
+
+
 @router.get("/settings", response_class=HTMLResponse, include_in_schema=False)
 def settings_page(
     request: Request,
@@ -369,11 +402,37 @@ def settings_page(
             "ytmusic_client_id": app_settings.ytmusic_client_id or "",
             "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
             "scheduler_enabled": app_settings.scheduler_enabled,
+            "automatic_pairs": automation_choices(session, app_settings),
             "sync_interval_minutes": app_settings.sync_interval_minutes,
+            "explicit_preference": app_settings.explicit_preference,
             "https_mode_enabled": app_settings.https_mode_enabled,
             "https_mode_locked": get_settings().session_cookie_secure is not None,
         },
     )
+
+
+@router.post("/settings/automation", response_class=RedirectResponse, include_in_schema=False)
+def save_automation_route(
+    session: Annotated[Session, Depends(get_db)],
+    pair_ids: Annotated[list[int] | None, Form()] = None,
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    """Store explicit, identity-bound consent without changing provider credentials."""
+    pair_ids = pair_ids or []
+    base_settings = get_settings()
+    pairs = SyncPairRepository(session).all()
+    if set(pair_ids) - {p.id for p in pairs}:
+        raise HTTPException(status_code=400, detail="unknown playlist pair")
+    save_app_settings(
+        session,
+        {
+            **load_saved_settings(session, base_settings),
+            "automatic_sync_bindings": [automation_binding(p) for p in pairs if p.id in pair_ids],
+        },
+        base_settings,
+    )
+    session.commit()
+    return RedirectResponse("/settings?saved=1", status_code=303)
 
 
 @router.post("/settings", response_class=RedirectResponse, include_in_schema=False)
@@ -390,6 +449,9 @@ def save_settings_route(
     scheduler_enabled: Annotated[str | None, Form()] = None,
     https_mode_enabled: Annotated[str | None, Form()] = None,
     sync_interval_minutes: Annotated[int, Form()] = 60,
+    explicit_preference: Annotated[
+        Literal["no_preference", "prefer_explicit", "prefer_clean"], Form()
+    ] = "no_preference",
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     """Encrypt and save provider and scheduler settings submitted by the UI."""
@@ -418,7 +480,9 @@ def save_settings_route(
             else ytmusic_client_secret.strip() or existing_secret("ytmusic_client_secret")
         ),
         "scheduler_enabled": scheduler_enabled is not None,
+        "automatic_sync_bindings": current_settings.automatic_sync_bindings,
         "sync_interval_minutes": max(1, min(sync_interval_minutes, 1440)),
+        "explicit_preference": explicit_preference,
     }
     restart_required = False
     if base_settings.session_cookie_secure is None:
@@ -486,7 +550,9 @@ def change_local_administrator_password(
                 "ytmusic_client_id": app_settings.ytmusic_client_id or "",
                 "ytmusic_secret_saved": bool(app_settings.ytmusic_client_secret),
                 "scheduler_enabled": app_settings.scheduler_enabled,
+                "automatic_pairs": automation_choices(session, app_settings),
                 "sync_interval_minutes": app_settings.sync_interval_minutes,
+                "explicit_preference": app_settings.explicit_preference,
                 "https_mode_enabled": app_settings.https_mode_enabled,
                 "https_mode_locked": get_settings().session_cookie_secure is not None,
             },
@@ -660,13 +726,21 @@ def youtube_music_complete(
         return RedirectResponse(
             "/pairs?connection_error=youtube_music", status_code=status.HTTP_303_SEE_OTHER
         )
-    token["expires_at"] = (
-        datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
-    ).isoformat()
-    identity = YouTubeMusicProvider(access_token=str(token["access_token"]))
+    identity = YTMusicApiProvider(
+        token,
+        client_id=app_settings.ytmusic_client_id,
+        client_secret=app_settings.ytmusic_client_secret,
+    )
     try:
         external_account_id, display_name = identity.account_identity()
-    except ProviderError:
+    except ProviderError as exc:
+        cause = exc.__cause__
+        logger.warning(
+            "YouTube Music account identity check failed (provider=%s, cause=%s, status=%s)",
+            type(exc).__name__,
+            type(cause).__name__ if cause is not None else "none",
+            YTMusicApiProvider._status_code(cause) if cause is not None else None,
+        )
         return RedirectResponse(
             "/pairs?connection_error=youtube_music_identity",
             status_code=status.HTTP_303_SEE_OTHER,
@@ -674,12 +748,30 @@ def youtube_music_complete(
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
     )
-    connected_other = session.scalar(
-        select(ProviderAccount).where(
-            ProviderAccount.provider_name == "youtube_music",
-            ProviderAccount.credentials_ciphertext.is_not(None),
-            ProviderAccount.external_account_id.not_in((external_account_id, "default")),
+    all_youtube_accounts = list(
+        session.scalars(
+            select(ProviderAccount).where(
+                ProviderAccount.provider_name == "youtube_music",
+            )
         )
+    )
+    connected_accounts = [
+        candidate
+        for candidate in all_youtube_accounts
+        if candidate.credentials_ciphertext is not None
+    ]
+    current_accounts = [
+        candidate
+        for candidate in connected_accounts
+        if account_repo.load_credentials(candidate).get("auth_scheme") == YOUTUBE_MUSIC_AUTH_SCHEME
+    ]
+    connected_other = next(
+        (
+            candidate
+            for candidate in current_accounts
+            if candidate.external_account_id != external_account_id
+        ),
+        None,
     )
     if connected_other is not None:
         return RedirectResponse(
@@ -689,6 +781,62 @@ def youtube_music_complete(
     account = account_repo.get_by_external_id("youtube_music", external_account_id)
     if account is None:
         account = account_repo.get_by_external_id("youtube_music", "default")
+    legacy_accounts = [
+        candidate
+        for candidate in connected_accounts
+        if account_repo.load_credentials(candidate).get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME
+    ]
+    if legacy_accounts and account is not None:
+        # A newly connected account can coexist with stale records
+        # only after an interrupted prior upgrade. Those pairs must remain
+        # paused because the legacy credential format cannot safely run.
+        session.execute(
+            update(SyncPair)
+            .where(
+                (SyncPair.source_account_id.in_([candidate.id for candidate in legacy_accounts]))
+                | (SyncPair.target_account_id.in_([candidate.id for candidate in legacy_accounts]))
+            )
+            .values(enabled=False)
+        )
+    if account is None and len(legacy_accounts) == 1:
+        # An experimental adapter exposed a channel handle while this adapter
+        # uses the stable Data API channel ID. Preserve the encrypted account record and pair IDs,
+        # but pause every pair until the operator reviews the new provider view.
+        account = legacy_accounts[0]
+        account.external_account_id = external_account_id
+        session.execute(
+            update(SyncPair)
+            .where(
+                (SyncPair.source_account_id == account.id)
+                | (SyncPair.target_account_id == account.id)
+            )
+            .values(enabled=False)
+        )
+    elif account is None and len(legacy_accounts) > 1:
+        return RedirectResponse(
+            "/pairs?connection_error=youtube_music_account_change",
+            status_code=status.HTTP_303_SEE_OTHER,
+        )
+    if account is None and not connected_accounts:
+        disconnected_accounts = [
+            candidate
+            for candidate in all_youtube_accounts
+            if candidate.credentials_ciphertext is None
+        ]
+        if len(disconnected_accounts) == 1:
+            # A user may have deliberately disconnected the legacy adapter
+            # before upgrading. Reuse its pair references only when there is
+            # exactly one unambiguous disconnected YouTube account.
+            account = disconnected_accounts[0]
+            account.external_account_id = external_account_id
+            session.execute(
+                update(SyncPair)
+                .where(
+                    (SyncPair.source_account_id == account.id)
+                    | (SyncPair.target_account_id == account.id)
+                )
+                .values(enabled=False)
+            )
     if account is None:
         account = ProviderAccount(
             provider_name="youtube_music",
@@ -716,8 +864,62 @@ def recent_runs(
     request: Request,
     session: Annotated[Session, Depends(get_db)],
 ) -> HTMLResponse:
-    runs = SyncRunRepository(session).recent()
-    return templates.TemplateResponse(request=request, name="runs.html", context={"runs": runs})
+    def provider_label(provider_name: str) -> str:
+        return {"spotify": "Spotify", "youtube_music": "YouTube Music"}.get(
+            provider_name, provider_name.replace("_", " ").title()
+        )
+
+    runs = SyncRunRepository(session).recent(limit=100)
+    pairs = {pair.id: pair for pair in SyncPairRepository(session).all()}
+    accounts = {account.id: account for account in session.scalars(select(ProviderAccount))}
+    activity: list[dict[str, Any]] = []
+    for run in runs:
+        events: list[dict[str, str]] = []
+        if run.plan_json:
+            try:
+                plan = decode_plan(run.plan_json)
+            except (TypeError, ValueError, KeyError):
+                plan = None
+            if run.status == "planned" and (
+                plan is None or (not plan.actions and not plan.conflicts)
+            ):
+                # Scheduled no-change previews are useful operationally but
+                # would otherwise hide the actual playlist history.
+                continue
+            pair = pairs.get(run.pair_id)
+            statuses = {
+                action.ordinal: action.status
+                for action in session.scalars(select(SyncAction).where(SyncAction.run_id == run.id))
+            }
+            if plan is not None:
+                for ordinal, action in enumerate(plan.actions):
+                    destination = "the paired playlist"
+                    if pair is not None:
+                        account_id = (
+                            pair.source_account_id
+                            if action.side.value == "source"
+                            else pair.target_account_id
+                        )
+                        account = accounts.get(account_id)
+                        if account is not None:
+                            destination = provider_label(account.provider_name)
+                    events.append(
+                        {
+                            "operation": "Added to"
+                            if action.action.value == "add_track"
+                            else "Removed from",
+                            "destination": destination,
+                            "track": action.track.title,
+                            "artists": ", ".join(action.track.artists),
+                            "status": statuses.get(ordinal, "planned"),
+                        }
+                    )
+        activity.append({"run": run, "events": events})
+        if len(activity) == 25:
+            break
+    return templates.TemplateResponse(
+        request=request, name="runs.html", context={"activity": activity}
+    )
 
 
 @router.get("/pairs", response_class=HTMLResponse, include_in_schema=False)
@@ -730,6 +932,7 @@ def pairs(
     source_selection: str | None = None,
     target_selection: str | None = None,
     initial_sync_policy: str | None = None,
+    sync_mode: str | None = None,
 ) -> HTMLResponse:
     app_settings = load_app_settings(session)
     saved_accounts = list(
@@ -784,7 +987,12 @@ def pairs(
         "youtube_music": "YouTube Music is connected. Choose playlists below.",
     }.get(connected)
     if connection_error:
-        connection_message = "The connection was cancelled or rejected. Try again when ready."
+        connection_message = {
+            "youtube_music_identity": "Google authorized OPS, but its YouTube channel could not "
+            "be read. Check that YouTube Data API v3 is enabled and this account has a channel.",
+            "youtube_music_account_change": "A different YouTube account is already connected. "
+            "Disconnect it before changing accounts.",
+        }.get(connection_error, "The connection was cancelled or rejected. Try again when ready.")
     if playlist_created:
         connection_message = "Playlist created. Choose both playlists, then create the pair."
     playlist_options = []
@@ -808,6 +1016,29 @@ def pairs(
         target_account = account_by_id.get(pair.target_account_id)
         if source_account is None or target_account is None:
             continue
+        latest = SyncRunRepository(session).latest_for_pair(pair.id)
+        pair_status = "Ready" if pair.enabled else "Paused"
+        pair_detail = ""
+        if pair.enabled and latest is not None:
+            if latest.status == "authorization_required":
+                pair_status = "Connection needs attention"
+                pair_detail = (
+                    "OPS retries access after one hour. If access remains blocked, "
+                    "reconnect the service, then click Review to check immediately."
+                )
+            elif latest.status in {"failed", "partially_applied", "review_failed", "conflict"}:
+                pair_status = "Review needed"
+                pair_detail = "Open Activity or create a new review for details."
+            elif latest.status in {"preparing", "applying"}:
+                pair_status = "Working"
+        automatic = automation_binding(pair) in app_settings.automatic_sync_bindings
+        schedule_detail = (
+            "Scheduled checks off"
+            if not app_settings.scheduler_enabled
+            else "Automatic sync enabled"
+            if automatic
+            else "Scheduled reviews only"
+        )
         configured_pairs.append(
             {
                 "id": pair.id,
@@ -820,6 +1051,10 @@ def pairs(
                     (target_account.id, pair.target_playlist_id), pair.target_playlist_id
                 ),
                 "target_provider": target_account.provider_name,
+                "sync_mode": pair.sync_mode,
+                "status": pair_status,
+                "status_detail": pair_detail,
+                "schedule_detail": schedule_detail,
             }
         )
     return templates.TemplateResponse(
@@ -835,6 +1070,7 @@ def pairs(
             "selected_source": source_selection or "",
             "selected_target": target_selection or "",
             "selected_policy": initial_sync_policy or InitialSyncPolicy.MERGE.value,
+            "selected_sync_mode": sync_mode or SyncMode.TWO_WAY.value,
         },
     )
 
@@ -865,10 +1101,12 @@ def create_pair(
     target_selection: Annotated[str, Form()],
     session: Annotated[Session, Depends(get_db)],
     initial_sync_policy: Annotated[str, Form()] = InitialSyncPolicy.MERGE.value,
+    sync_mode: Annotated[str, Form()] = SyncMode.TWO_WAY.value,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> HTMLResponse | RedirectResponse:
     try:
         policy = InitialSyncPolicy(initial_sync_policy)
+        mode = SyncMode(sync_mode)
     except ValueError as exc:
         raise HTTPException(
             status_code=400, detail="invalid initial synchronization policy"
@@ -897,6 +1135,7 @@ def create_pair(
                 "side": side,
                 "other_selection": other_selection,
                 "initial_sync_policy": policy.value,
+                "sync_mode": mode.value,
             },
         )
 
@@ -919,6 +1158,7 @@ def create_pair(
             target_account_id=target_account_id,
             source_playlist_id=source_playlist_id,
             target_playlist_id=target_playlist_id,
+            sync_mode=mode.value,
             initial_sync_policy=policy.value,
         )
     )
@@ -936,6 +1176,7 @@ def create_playlist(
     initial_sync_policy: Annotated[str, Form()],
     name: Annotated[str, Form()],
     description: Annotated[str, Form()] = "",
+    sync_mode: Annotated[str, Form()] = SyncMode.TWO_WAY.value,
     _: Annotated[None, Depends(require_csrf)] = None,
 ) -> RedirectResponse:
     """Create a private playlist on a connected provider, then return to pairing."""
@@ -944,6 +1185,7 @@ def create_playlist(
         raise HTTPException(status_code=400, detail="invalid playlist side")
     try:
         policy = InitialSyncPolicy(initial_sync_policy)
+        mode = SyncMode(sync_mode)
     except ValueError as exc:
         raise HTTPException(
             status_code=400, detail="invalid initial synchronization policy"
@@ -971,10 +1213,106 @@ def create_playlist(
         if side == "source"
         else {"source_selection": other_selection, "target_selection": created_selection}
     )
-    selections.update({"initial_sync_policy": policy.value, "playlist_created": "1"})
+    selections.update(
+        {
+            "initial_sync_policy": policy.value,
+            "sync_mode": mode.value,
+            "playlist_created": "1",
+        }
+    )
     return RedirectResponse(
         f"/pairs?{urlencode(selections)}", status_code=status.HTTP_303_SEE_OTHER
     )
+
+
+def matched_track_rows(groups: list[dict[str, Any]]) -> list[list[Any]]:
+    """Align saved identities, retaining unmatched and duplicate occurrences."""
+    from collections import defaultdict, deque
+
+    if not groups:
+        return []
+    right = defaultdict(deque)
+    for index, track in enumerate(groups[1]["tracks"] if len(groups) > 1 else ()):
+        right[track.key].append((index, track))
+    used = set()
+    rows = []
+    for track in groups[0]["tracks"]:
+        match = right[track.key].popleft() if right[track.key] else None
+        if match:
+            used.add(match[0])
+        rows.append([track, match[1] if match else None])
+    if len(groups) > 1:
+        rows.extend(
+            [None, track] for index, track in enumerate(groups[1]["tracks"]) if index not in used
+        )
+    return rows
+
+
+@router.get("/pairs/{pair_id}/matches", response_class=HTMLResponse, include_in_schema=False)
+def saved_matches(
+    request: Request, pair_id: int, session: Annotated[Session, Depends(get_db)]
+) -> HTMLResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(404, "Pair not found")
+    baseline = SyncBaselineRepository(session).latest_for_pair(pair.id)
+    groups = []
+    if baseline:
+        state = decode_baseline(baseline.snapshot_json)
+        for side, playlist, account_id in (
+            ("source", state.source, pair.source_account_id),
+            ("target", state.target, pair.target_account_id),
+        ):
+            account = session.get(ProviderAccount, account_id)
+            groups.append(
+                {
+                    "side": side,
+                    "provider": "Spotify"
+                    if account.provider_name == "spotify"
+                    else "YouTube Music",
+                    "editable": not (side == "source" and pair.sync_mode == "source_to_target"),
+                    "tracks": playlist.tracks,
+                }
+            )
+    groups.sort(key=lambda group: group["provider"] != "Spotify")
+    return templates.TemplateResponse(
+        request=request,
+        name="matches.html",
+        context={"pair": pair, "groups": groups, "rows": matched_track_rows(groups)},
+    )
+
+
+@router.post(
+    "/pairs/{pair_id}/matches",
+    response_class=HTMLResponse,
+    response_model=None,
+    include_in_schema=False,
+)
+def change_saved_match(
+    request: Request,
+    pair_id: int,
+    side: Annotated[str, Form()],
+    track_id: Annotated[str, Form()],
+    session: Annotated[Session, Depends(get_db)],
+    app_settings: Annotated[Settings, Depends(settings)],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> HTMLResponse | RedirectResponse:
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(404, "Pair not found")
+    try:
+        review = SyncCoordinator(session, app_settings, create_provider).prepare_replacement(
+            pair, Side(side), track_id
+        )
+    except (ValueError, ProviderError, PlanExecutionError, PairOperationBusy) as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="matches.html",
+            context={"pair": pair, "groups": (), "error": str(exc)},
+            status_code=400,
+        )
+    request.session[f"sync_review_token:{review.review_id}"] = review.approval_token
+    return RedirectResponse(f"/sync/plan/{pair.id}?review_id={review.review_id}", status_code=303)
 
 
 @router.post("/pairs/{pair_id}/toggle", response_class=RedirectResponse, include_in_schema=False)
@@ -988,6 +1326,43 @@ def toggle_pair(
         raise HTTPException(status_code=404, detail="sync pair not found")
     pair.enabled = not pair.enabled
     session.commit()
+    return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
+
+
+@router.post("/pairs/{pair_id}/mode", response_class=RedirectResponse, include_in_schema=False)
+def set_pair_sync_mode(
+    pair_id: int,
+    session: Annotated[Session, Depends(get_db)],
+    sync_mode: Annotated[str, Form()],
+    _: Annotated[None, Depends(require_csrf)] = None,
+) -> RedirectResponse:
+    """Change propagation direction without changing either playlist."""
+
+    pair = SyncPairRepository(session).get(pair_id)
+    if pair is None:
+        raise HTTPException(status_code=404, detail="sync pair not found")
+    try:
+        mode = SyncMode(sync_mode).value
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail="invalid sync direction") from exc
+    try:
+        lease = acquire_pair_lease(session, pair.id)
+    except PairOperationBusy as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    try:
+        if pair.sync_mode != mode:
+            pair.sync_mode = mode
+            session.execute(
+                update(SyncRun)
+                .where(
+                    SyncRun.pair_id == pair.id,
+                    SyncRun.status.in_(("planned", "conflict", "baseline_upgrade")),
+                )
+                .values(status="stale", approval_token_hash=None)
+            )
+            session.commit()
+    finally:
+        lease.release()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)
 
 
@@ -1034,6 +1409,11 @@ def disconnect_provider(
     for account in accounts:
         account.credentials_ciphertext = None
         account.credential_key_id = None
+    # Search evidence is not credential material, but it is account-specific
+    # listening metadata and should not survive an explicit disconnect.
+    session.execute(
+        delete(ProviderSearchCache).where(ProviderSearchCache.account_id.in_(account_ids))
+    )
     session.execute(
         update(SyncPair)
         .where(
@@ -1088,14 +1468,28 @@ def create_sync_review(
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
     _: Annotated[None, Depends(require_csrf)] = None,
-) -> RedirectResponse:
+) -> Response:
     pair = SyncPairRepository(session).get(pair_id)
     if pair is None:
         raise HTTPException(status_code=404, detail="sync pair not found")
     try:
         review = SyncCoordinator(session, app_settings, create_provider).prepare_review(pair)
-    except (ValueError, CredentialEncryptionError, ProviderError, PairOperationBusy) as exc:
-        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except (
+        ValueError,
+        CredentialEncryptionError,
+        ProviderError,
+        PairOperationBusy,
+        PartialSyncRecoveryRequired,
+        TrackMappingConflict,
+    ) as exc:
+        return templates.TemplateResponse(
+            request=request,
+            name="sync_plan.html",
+            context={"pair": pair, "plan": None, "review": None, "error": str(exc)},
+            status_code=409
+            if isinstance(exc, (TrackMappingConflict, PartialSyncRecoveryRequired))
+            else 503,
+        )
     for key in tuple(request.session):
         if str(key).startswith("sync_review_token:"):
             request.session.pop(key, None)
@@ -1158,7 +1552,6 @@ def apply_sync_plan(
     pair_id: int,
     app_settings: Annotated[Settings, Depends(settings)],
     session: Annotated[Session, Depends(get_db)],
-    confirmation: Annotated[str, Form()] = "",
     fingerprint: Annotated[str, Form()] = "",
     review_id: Annotated[int | None, Form()] = None,
     approval_token: Annotated[str, Form()] = "",  # nosec B107
@@ -1184,7 +1577,7 @@ def apply_sync_plan(
             plan,
             Approval(
                 plan_fingerprint=fingerprint,
-                confirmation=confirmation,
+                confirmation="",
                 review_id=review_id,
                 token=approval_token,
             ),

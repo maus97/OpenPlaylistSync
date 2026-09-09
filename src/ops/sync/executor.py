@@ -47,10 +47,12 @@ def _provider_track(track: TrackState) -> ProviderTrack:
         provider_track_id=track.source_provider_track_id,
         title=track.title,
         artists=track.artists,
+        album=track.album,
         duration_ms=track.duration_ms,
         isrc=track.isrc,
         occurrence_id=track.occurrence_id,
         position=track.position,
+        explicit=track.explicit,
     )
 
 
@@ -69,9 +71,11 @@ class SyncExecutor:
         target_snapshot_id: str | None = None,
         approval: Approval | None = None,
         skip_unresolved: bool = False,
+        fail_on_unavailable: bool = False,
         pre_resolved_tracks: Mapping[int, ProviderTrack] | None = None,
         on_action_completed: Callable[[int], None] | None = None,
         on_track_resolved: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
+        on_track_unavailable: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
     ) -> ExecutionResult:
         validate_approval(plan, approval)
         prepared: list[tuple[int, ReconciliationAction, ProviderTrack]] = []
@@ -104,9 +108,15 @@ class SyncExecutor:
                 try:
                     new_snapshot = provider.add_tracks(playlist_id, [provider_track])
                 except TrackUnavailable:
+                    if fail_on_unavailable:
+                        raise PlanExecutionError(
+                            "Replacement unavailable; the previous recording was not removed"
+                        ) from None
                     # A provider can reject a video after review because of a
                     # regional or rights restriction. Continue with the other
                     # reviewed additions, but never advance the baseline.
+                    if on_track_unavailable is not None:
+                        on_track_unavailable(action, provider_track)
                     skipped_indices.append(index)
                     provider_rejected_indices.append(index)
                     continue

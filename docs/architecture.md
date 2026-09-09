@@ -46,7 +46,7 @@ flowchart TD
     sync --> reconcile["Three-way reconciliation"]
     sync --> provider["Provider interface"]
     provider --> spotify["Spotify adapter"]
-    provider --> youtube["YouTube Music adapter"]
+    provider --> youtube["YouTube Music adapter / Data API + ytmusicapi search"]
     app --> storage["SQLAlchemy repositories"]
     storage --> sqlite["SQLite"]
     secrets["Separate secret volume"] --> credential["Credential encryption boundary"]
@@ -80,28 +80,40 @@ provider-specific playlist and track representations into the neutral domain
 types. HTTP clients and authentication details stay here. The adapter boundary
 must accept injected clients or transport fakes.
 
-The current milestone contains operator-assisted authentication boundaries,
-read operations, and write operations for Spotify and YouTube Music. A review is
-initiated by a CSRF-protected POST, bounded in size/provider lookups, and
-persisted with the complete ordered source and target state hashes. Apply
-consumes a short-lived one-time approval, re-fetches both playlists, rejects
-state drift, and holds a database-backed per-pair lease. Destructive actions
-additionally require an explicit confirmation phrase.
+The YouTube Music adapter is `YTMusicApiProvider`. It keeps public catalogue
+searches on a separate unauthenticated ytmusicapi client, while authenticated
+account, playlist, and track-list operations use the supported YouTube Data API
+v3 with the encrypted Google OAuth access token. YouTube Music's private
+InnerTube endpoint currently rejects OAuth Bearer tokens with HTTP 400, so OPS
+does not use its authenticated ytmusicapi path. No ytmusicapi `oauth.json` file
+is created. Account identity uses the stable Data API channel ID; the legacy
+injected ytmusicapi seam still has a privacy-preserving metadata/token fallback
+for tests and older integrations. No token value is stored as the account key.
+
+A review is initiated by a CSRF-protected POST, bounded in size/provider
+lookups, and persisted with the complete ordered source and target state hashes.
+Apply consumes a short-lived one-time approval, re-fetches both playlists,
+rejects state drift, and holds a database-backed per-pair lease. Destructive
+actions additionally require an explicit confirmation phrase.
 
 Snapshots preserve playlist occurrences rather than collapsing duplicate songs.
-Spotify positions and YouTube Music playlist-item IDs remain attached to an
+Spotify positions and YouTube Music `setVideoId` values remain attached to an
 occurrence so a reviewed removal can target one exact provider item. Initial
 synchronization has an explicit persisted policy: merge, source-led,
 target-led, or accept-as-is. The first three modes add only; no initial policy
 can infer a deletion.
 
 When OPS successfully adds a resolved track to the other provider, it stores
-that destination provider ID with the source's canonical sync key and the pair
-that established the evidence in `provider_track_mappings`. Later snapshots for
-that pair apply the verified mapping before three-way reconciliation. Identity
-rules are versioned; an older baseline must be explicitly re-established before
-new rules can produce writes. This prevents cross-pair cache poisoning and
-unsafe deletions during identity migrations.
+that destination provider ID, source provider ID/ISRC, canonical sync key, and
+pair that established the evidence in `provider_track_mappings`. Later
+snapshots reuse direct source-ID mappings first, then ISRC and canonical
+metadata mappings. `provider_search_cache` stores bounded, per-account search
+evidence by a metadata fingerprint: 14 days for an automatic match and 12 hours
+for an unresolved result. A destination rejection invalidates the related
+mapping and cache entry before the next review. Identity rules are versioned;
+an older baseline must be explicitly re-established before new rules can
+produce writes. This prevents cross-pair cache poisoning and unsafe deletions
+during identity migrations.
 
 ### `src/ops/sync/`
 
@@ -145,7 +157,8 @@ playlist and track types:
 - create a playlist;
 - add tracks;
 - remove tracks;
-- rename or update playlist metadata.
+- rename or update playlist metadata;
+- reorder an exact playlist occurrence where the provider supports it.
 
 Provider IDs remain opaque strings. The synchronization engine must never infer
 that a Spotify ID and a YouTube Music ID are interchangeable. Track matching
@@ -248,6 +261,49 @@ allowlists.
 - CI will run formatting, linting, and the full test suite on Python 3.12.
 - The container image is built in a separate CI job.
 
+## Recording identity during review
+
+Before remote search, the coordinator reuses the destination playlist as a
+candidate set under the provider's normal recording/version matching rules.
+When a resolved recording is already present with a different canonical key,
+OPS records the verified cross-provider equivalence and rebuilds reconciliation.
+Only exact destination IDs or matching ISRCs establish this equivalence; raw
+title similarity alone never merges identities. Real occurrence-count gaps
+remain additions, so intentional duplicate occurrences are preserved.
+
+Verified aliases are also applied to an in-memory reading of the immutable
+baseline. The persisted baseline is never rewritten during review. This avoids
+turning an identity correction into a phantom removal or a returning addition.
+Apply checks all pending mapping identities before any provider write and rejects
+older reviews that would add an already-present recording under a different key.
+Failed initial runs with excess receiving-side copies pause recovery review
+instead of automatically propagating those copies.
+
+After an accepted addition, a provider playlist listing can briefly be stale.
+OPS retains that exact acknowledged provider recording in the next baseline only
+when the immediate re-read has omitted it. The verified provider-ID mapping then
+recognizes the occurrence when it becomes visible. This prevents an eventual
+listing from being misclassified as a new reverse-direction addition. It does
+not merge distinct recordings or discard intentional duplicate occurrences.
+
+## Opt-in automatic synchronization
+
+Scheduling defaults to disabled; enabled pairs remain preview-only unless the
+operator explicitly opts them into automatic additions and removals in Settings.
+Consent is an encrypted configuration binding to the pair creation time, account
+IDs and playlist IDs, not just a reusable numeric pair ID. No schema change is
+required. Source and target are labels, not permanent authority: later changes
+reconcile bidirectionally against the successful baseline.
+
+Automatic work uses normal prepare/apply, one-time plan tokens, pair leases,
+state-hash revalidation, strict resolution, occurrence guards, and action journals.
+First sync and baseline upgrades remain manual. Unresolved matches/conflicts
+block the whole automatic apply. Uncertain writes since the last baseline require
+manual recovery rather than blind retries. Per-side removals exceeding 10 tracks
+or 25% of the baseline (one-track minimum), and removals emptying a side, require
+manual review. Failures on one pair do not stop checks for other pairs. The
+Activity review and sanitized scheduler logs provide investigation evidence.
+
 ## Decisions requiring future attention
 
 1. **Credential key rotation and recovery:** Fernet authenticated encryption is
@@ -265,6 +321,6 @@ allowlists.
    removals and asks the operator to resolve the occurrence manually.
 6. **Baseline storage scale:** validate JSON snapshots with realistic playlist
    sizes before committing to normalized tables or a hybrid schema.
-7. **Scheduler behavior:** the lifecycle and single-instance preview tick are
-   implemented; define durable job state, retries, backoff, and recovery after
-   process restarts.
+7. **Scheduler behavior:** opt-in automatic ticks and fail-closed recovery are
+   implemented; durable notifications and adaptive provider backoff remain future
+   improvements. OPS must stay running for scheduled checks to happen.

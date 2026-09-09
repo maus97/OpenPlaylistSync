@@ -5,6 +5,7 @@ import secrets
 from collections.abc import Callable
 from functools import lru_cache
 from pathlib import Path
+from typing import Literal
 
 from cryptography.fernet import Fernet
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -30,7 +31,11 @@ class Settings(BaseSettings):
     trusted_proxy_ips: str = ""
     max_request_body_bytes: int = 65_536
     scheduler_enabled: bool = False
+    automatic_sync_bindings: list[str] = []
     sync_interval_minutes: int = 60
+    explicit_preference: Literal["no_preference", "prefer_explicit", "prefer_clean"] = (
+        "no_preference"
+    )
     spotify_client_id: str | None = None
     spotify_client_secret: str | None = None
     spotify_redirect_uri: str = "http://127.0.0.1:8000/auth/spotify/callback"

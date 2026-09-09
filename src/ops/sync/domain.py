@@ -10,7 +10,9 @@ from enum import StrEnum
 
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
-TRACK_IDENTITY_VERSION = 2
+# ytmusicapi returns catalogue metadata rather than upload metadata. Existing
+# baselines therefore need an explicit, non-destructive re-baselining review.
+TRACK_IDENTITY_VERSION = 3
 
 
 def normalize_text(value: str) -> str:
@@ -52,10 +54,12 @@ class TrackState:
     title: str
     artists: tuple[str, ...]
     source_provider_track_id: str
+    album: str | None = None
     duration_ms: int | None = None
     isrc: str | None = None
     occurrence_id: str | None = None
     position: int | None = None
+    explicit: bool | None = None
 
     @classmethod
     def from_provider_track(cls, track: ProviderTrack) -> "TrackState":
@@ -64,10 +68,12 @@ class TrackState:
             title=track.title,
             artists=track.artists,
             source_provider_track_id=track.provider_track_id,
+            album=track.album,
             duration_ms=track.duration_ms,
             isrc=track.isrc,
             occurrence_id=track.occurrence_id,
             position=track.position,
+            explicit=track.explicit,
         )
 
 
@@ -133,6 +139,13 @@ class InitialSyncPolicy(StrEnum):
     SOURCE_AUTHORITATIVE = "source_authoritative"
     TARGET_AUTHORITATIVE = "target_authoritative"
     ACCEPT_AS_IS = "accept_as_is"
+
+
+class SyncMode(StrEnum):
+    """How a configured pair is allowed to propagate changes."""
+
+    TWO_WAY = "two_way"
+    SOURCE_TO_TARGET = "source_to_target"
 
 
 @dataclass(frozen=True, slots=True)
@@ -269,6 +282,49 @@ def _initial_actions(
     return actions
 
 
+def _source_to_target_actions(
+    baseline: BaselineState, source: PlaylistState, target: PlaylistState
+) -> list[ReconciliationAction]:
+    """Mirror source changes to target without ever writing back to source."""
+
+    source_adds, source_removes = _changes(baseline.source, source)
+    target_adds, target_removes = _changes(baseline.target, target)
+    source_tracks = source.grouped_by_key()
+    target_tracks = target.grouped_by_key()
+    baseline_source_tracks = baseline.source.grouped_by_key()
+    actions: list[ReconciliationAction] = []
+    keys = sorted(set(source_adds) | set(source_removes) | set(target_adds) | set(target_removes))
+    for key in keys:
+        additions = max(source_adds[key] - target_adds[key], 0) + max(
+            target_removes[key] - source_removes[key], 0
+        )
+        removals = max(source_removes[key] - target_removes[key], 0) + max(
+            target_adds[key] - source_adds[key], 0
+        )
+        source_occurrences = source_tracks.get(key, baseline_source_tracks.get(key, ()))
+        target_occurrences = target_tracks.get(key, ())
+        for index in range(additions):
+            if source_occurrences:
+                actions.append(
+                    ReconciliationAction(
+                        side=Side.TARGET,
+                        action=ActionType.ADD_TRACK,
+                        track=source_occurrences[index % len(source_occurrences)],
+                        reason="source controls this playlist pair",
+                    )
+                )
+        for index in range(min(removals, len(target_occurrences))):
+            actions.append(
+                ReconciliationAction(
+                    side=Side.TARGET,
+                    action=ActionType.REMOVE_TRACK,
+                    track=target_occurrences[index],
+                    reason="source controls this playlist pair",
+                )
+            )
+    return actions
+
+
 def _sorted_actions(actions: Iterable[ReconciliationAction]) -> tuple[ReconciliationAction, ...]:
     return tuple(
         sorted(
@@ -289,6 +345,7 @@ def reconcile(
     target: PlaylistState,
     *,
     initial_policy: InitialSyncPolicy = InitialSyncPolicy.MERGE,
+    mode: SyncMode = SyncMode.TWO_WAY,
 ) -> ReconciliationPlan:
     """Build a three-way plan without provider calls or writes.
 
@@ -297,6 +354,8 @@ def reconcile(
     """
 
     if baseline is None:
+        if mode is SyncMode.SOURCE_TO_TARGET:
+            initial_policy = InitialSyncPolicy.SOURCE_AUTHORITATIVE
         return ReconciliationPlan(
             actions=_sorted_actions(_initial_actions(source, target, initial_policy)),
             conflicts=(),
@@ -304,12 +363,16 @@ def reconcile(
             initial_policy=initial_policy,
         )
 
+    if mode is SyncMode.SOURCE_TO_TARGET:
+        return ReconciliationPlan(
+            actions=_sorted_actions(_source_to_target_actions(baseline, source, target)),
+            conflicts=(),
+        )
+
     source_adds, source_removes = _changes(baseline.source, source)
     target_adds, target_removes = _changes(baseline.target, target)
     source_tracks = source.grouped_by_key()
     target_tracks = target.grouped_by_key()
-    baseline_source_tracks = baseline.source.grouped_by_key()
-    baseline_target_tracks = baseline.target.grouped_by_key()
     suppressed, conflicts = _metadata_conflict_keys(baseline, source, target)
     actions: list[ReconciliationAction] = []
     keys = sorted(set(source_adds) | set(source_removes) | set(target_adds) | set(target_removes))
@@ -354,28 +417,29 @@ def reconcile(
                 )
 
         if source_removed > target_removed:
-            target_occurrences = target_tracks.get(key, baseline_target_tracks.get(key, ()))
-            for index in range(source_removed - target_removed):
-                if target_occurrences:
-                    actions.append(
-                        ReconciliationAction(
-                            side=Side.TARGET,
-                            action=ActionType.REMOVE_TRACK,
-                            track=target_occurrences[index % len(target_occurrences)],
-                            reason="source removed the track since the last successful baseline",
-                        )
+            # Accepted or source-authoritative baselines may have unequal
+            # occurrence counts. Only live entries are valid deletion targets;
+            # do not replay a baseline-only entry or recycle one occurrence.
+            target_occurrences = target_tracks.get(key, ())
+            for track in target_occurrences[: source_removed - target_removed]:
+                actions.append(
+                    ReconciliationAction(
+                        side=Side.TARGET,
+                        action=ActionType.REMOVE_TRACK,
+                        track=track,
+                        reason="source removed the track since the last successful baseline",
                     )
+                )
         elif target_removed > source_removed:
-            source_occurrences = source_tracks.get(key, baseline_source_tracks.get(key, ()))
-            for index in range(target_removed - source_removed):
-                if source_occurrences:
-                    actions.append(
-                        ReconciliationAction(
-                            side=Side.SOURCE,
-                            action=ActionType.REMOVE_TRACK,
-                            track=source_occurrences[index % len(source_occurrences)],
-                            reason="target removed the track since the last successful baseline",
-                        )
+            source_occurrences = source_tracks.get(key, ())
+            for track in source_occurrences[: target_removed - source_removed]:
+                actions.append(
+                    ReconciliationAction(
+                        side=Side.SOURCE,
+                        action=ActionType.REMOVE_TRACK,
+                        track=track,
+                        reason="target removed the track since the last successful baseline",
                     )
+                )
 
     return ReconciliationPlan(actions=_sorted_actions(actions), conflicts=tuple(conflicts))

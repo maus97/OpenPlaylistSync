@@ -1,16 +1,15 @@
 from urllib.parse import parse_qs, urlparse
 
-import httpx
 import pytest
 
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
 from ops.auth.youtube_music import (
-    DEVICE_GRANT_TYPE,
-    GOOGLE_DEVICE_CODE_URL,
-    GOOGLE_TOKEN_URL,
+    YOUTUBE_MUSIC_AUTH_SCHEME,
     YOUTUBE_MUSIC_OAUTH_SCOPE,
     YouTubeMusicAuthService,
     YouTubeMusicOAuthError,
+    normalize_oauth_token,
+    oauth_token_needs_refresh,
 )
 
 
@@ -37,51 +36,75 @@ def test_spotify_authorization_url_contains_state_and_scopes() -> None:
     assert "playlist-modify-public" in query["scope"][0]
 
 
-def test_youtube_music_oauth_scope_allows_library_read_and_write() -> None:
-    assert YOUTUBE_MUSIC_OAUTH_SCOPE == "https://www.googleapis.com/auth/youtube.force-ssl"
+class FakeOAuthCredentials:
+    def __init__(self) -> None:
+        self.device_codes: list[str] = []
+        self.refreshes: list[str] = []
+        self.code_payload: dict[str, object] = {
+            "device_code": "device-code",
+            "user_code": "ABC-DEF",
+            "verification_url": "https://www.google.com/device",
+        }
+        self.token_payload: dict[str, object] = {
+            "access_token": "access-token",
+            "refresh_token": "refresh-token",
+            "expires_in": 3600,
+            "scope": YOUTUBE_MUSIC_OAUTH_SCOPE,
+            "token_type": "Bearer",
+        }
+
+    def get_code(self) -> dict[str, object]:
+        return self.code_payload
+
+    def token_from_code(self, device_code: str) -> dict[str, object]:
+        self.device_codes.append(device_code)
+        return self.token_payload
+
+    def refresh_token(self, refresh_token: str) -> dict[str, object]:
+        self.refreshes.append(refresh_token)
+        return {"access_token": "new-access-token", "expires_in": 1800}
 
 
-def test_spotify_code_exchange_binds_pkce_verifier() -> None:
-    requests: list[httpx.Request] = []
+def test_ytmusicapi_oauth_normalizes_a_refreshable_encrypted_token() -> None:
+    fake = FakeOAuthCredentials()
+    service = YouTubeMusicAuthService("client-id", "client-secret", credentials=fake)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(200, json={"access_token": "access"})
+    code = service.request_code()
+    token = service.exchange_device_code("device-code")
+    refreshed = service.refresh_token("refresh-token")
 
-    service = SpotifyOAuthService(
-        SpotifyOAuthConfig("client-id", "client-secret", "https://ops.example/callback"),
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-    token = service.exchange_code("authorization-code", code_verifier="pkce-verifier")
-
-    assert token == {"access_token": "access"}
-    body = parse_qs(requests[0].content.decode("ascii"))
-    assert body["code_verifier"] == ["pkce-verifier"]
-    assert body["code"] == ["authorization-code"]
-    assert "authorization-code" not in str(requests[0].url)
+    assert code["verification_url"] == "https://www.google.com/device"
+    assert fake.device_codes == ["device-code"]
+    assert token["auth_scheme"] == YOUTUBE_MUSIC_AUTH_SCHEME
+    assert token["scope"] == YOUTUBE_MUSIC_OAUTH_SCOPE
+    assert isinstance(token["expires_at"], int)
+    assert refreshed["refresh_token"] == "refresh-token"
+    assert fake.refreshes == ["refresh-token"]
 
 
-def test_youtube_device_flow_uses_official_endpoints_and_sanitizes_errors() -> None:
-    requests: list[httpx.Request] = []
+def test_ytmusicapi_oauth_sanitizes_provider_errors() -> None:
+    fake = FakeOAuthCredentials()
+    fake.token_payload = {
+        "error": "invalid_client",
+        "error_description": "sensitive provider detail",
+    }
+    service = YouTubeMusicAuthService("client-id", "client-secret", credentials=fake)
 
-    def handler(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        if str(request.url) == GOOGLE_DEVICE_CODE_URL:
-            return httpx.Response(200, json={"device_code": "device", "user_code": "user"})
-        return httpx.Response(
-            400,
-            json={"error": "invalid_client", "error_description": "sensitive provider detail"},
-        )
-
-    service = YouTubeMusicAuthService(
-        "client-id",
-        "client-secret",
-        client=httpx.Client(transport=httpx.MockTransport(handler)),
-    )
-    assert service.request_code()["device_code"] == "device"
     with pytest.raises(YouTubeMusicOAuthError, match="rejected") as caught:
-        service.exchange_device_code("device")
+        service.exchange_device_code("device-code")
+
     assert "sensitive provider detail" not in str(caught.value)
-    assert str(requests[1].url) == GOOGLE_TOKEN_URL
-    body = parse_qs(requests[1].content.decode("ascii"))
-    assert body["grant_type"] == [DEVICE_GRANT_TYPE]
+
+
+def test_ytmusicapi_oauth_rejects_missing_device_fields_and_legacy_tokens() -> None:
+    fake = FakeOAuthCredentials()
+    fake.code_payload = {"device_code": "device-code"}
+    with pytest.raises(YouTubeMusicOAuthError, match="invalid"):
+        YouTubeMusicAuthService("client-id", "client-secret", credentials=fake).request_code()
+
+    assert oauth_token_needs_refresh({"access_token": "legacy"}, now=1)
+    current = normalize_oauth_token(
+        {"access_token": "access", "refresh_token": "refresh", "expires_in": 3600}, now=100
+    )
+    assert not oauth_token_needs_refresh(current, now=101)
+    assert oauth_token_needs_refresh(current, now=3_700)

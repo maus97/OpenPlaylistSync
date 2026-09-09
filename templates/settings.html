@@ -36,7 +36,7 @@
 
     <article class="card">
       <div class="card-heading"><span class="icon-bubble red">▶</span><div><h2><a class="provider-title" href="/setup/youtube_music">YouTube Music <span aria-hidden="true">↗</span></a></h2><p>Google Cloud Console</p></div></div>
-      <p class="provider-brief">Enable YouTube Data API v3, create a TVs and Limited Input devices OAuth client, then paste its ID and secret.</p>
+      <p class="provider-brief">Enable YouTube Data API v3 in your Google project, create a TVs and Limited Input devices OAuth client, then paste its ID and secret.</p>
       <label>Google OAuth client ID
         <input name="ytmusic_client_id" value="{{ ytmusic_client_id }}" autocomplete="off" placeholder="Paste Google OAuth client ID">
       </label>
@@ -44,18 +44,26 @@
         <input type="password" name="ytmusic_client_secret" autocomplete="new-password" placeholder="Leave blank to keep the saved secret">
       </label>
       <label class="checkbox-label"><input type="checkbox" name="clear_ytmusic_secret" value="1"> Clear saved YouTube Music secret</label>
-      <p class="field-help">Enable YouTube Data API v3 before connecting.</p>
+      <p class="field-help">Song searches use the YouTube Music catalogue. Reading and updating playlists uses your project's YouTube Data API quota. No API key is needed.</p>
     </article>
   </section>
 
   <section class="grid two-up">
     <article class="card">
-      <div class="card-heading"><span class="icon-bubble green">↻</span><div><h2>Sync schedule</h2><p>Automatic checks create previews only.</p></div></div>
-      <label class="checkbox-label"><input type="checkbox" name="scheduler_enabled" value="1"{% if scheduler_enabled %} checked{% endif %}> Enable scheduled preview checks</label>
+      <div class="card-heading"><span class="icon-bubble green">↻</span><div><h2>Sync schedule</h2><p>Check both services for changes.</p></div></div>
+      <label class="checkbox-label"><input type="checkbox" name="scheduler_enabled" value="1"{% if scheduler_enabled %} checked{% endif %}> Enable scheduled checks</label>
       <label>Check interval, in minutes
         <input type="number" name="sync_interval_minutes" min="1" max="1440" value="{{ sync_interval_minutes }}">
       </label>
-      <p class="field-help">Automatic checks never remove tracks.</p>
+      <label>Explicit / clean preference
+        <select name="explicit_preference">
+          <option value="no_preference"{% if explicit_preference == 'no_preference' %} selected{% endif %}>Ask me when uncertain</option>
+          <option value="prefer_explicit"{% if explicit_preference == 'prefer_explicit' %} selected{% endif %}>Prefer explicit</option>
+          <option value="prefer_clean"{% if explicit_preference == 'prefer_clean' %} selected{% endif %}>Prefer clean</option>
+        </select>
+      </label>
+      <p class="field-help">Used only when Spotify offers otherwise equal explicit and clean versions and the other service does not say which it is.</p>
+      <p class="field-help">Checks create previews unless automatic sync is enabled for a pair below.</p>
     </article>
 
     <article class="card accent-card">
@@ -73,13 +81,28 @@
   <div class="hero-actions"><button class="button primary" type="submit">Save settings</button><a class="button ghost" href="/pairs">Back to playlists</a></div>
 </form>
 
+<section class="card">
+  <h2>Automatic sync</h2>
+  <p>Selected pairs automatically add and remove tracks when scheduled checks are enabled. Two-way pairs update both playlists. Source controls target pairs update only the target.</p>
+  <form method="post" action="/settings/automation">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for pair in automatic_pairs %}
+    <label class="checkbox-label"><input type="checkbox" name="pair_ids" value="{{ pair.id }}"{% if pair.active %} checked{% endif %}> {{ pair.name }} — {{ pair.direction }} — automatically add and remove tracks</label>
+    {% else %}
+    <p class="field-help">Create a playlist pair on <a class="text-link" href="/pairs">Playlists</a> to choose automatic sync.</p>
+    {% endfor %}
+    <p class="field-help">Complete the first sync manually. Ambiguous matches, conflicts, incomplete writes, and bulk removals pause for review. Automatic removal is limited to 10 tracks and 25% of a playlist per check (one track minimum), and never empties a playlist.</p>
+    <button class="button primary" type="submit">Save automatic sync choices</button>
+  </form>
+</section>
+
 <section class="card" id="first-sync">
   <div class="section-heading"><div><p class="eyebrow">NEXT STEPS</p><h2>Connect and sync</h2></div></div>
   <ol class="setup-list">
     <li>Save the provider details above, then open <a class="text-link" href="/pairs">Playlists</a> and connect each service.</li>
     <li>Choose an existing playlist or create a new empty playlist on either service, then create the pair.</li>
     <li>Choose the first-sync option and review every proposed change. The first sync only adds tracks.</li>
-    <li>Later removals are shown clearly and require a typed confirmation before OPS applies them.</li>
+    <li>Later removals require review unless you enable automatic sync for that pair.</li>
   </ol>
 </section>
 

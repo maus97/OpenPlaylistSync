@@ -29,7 +29,7 @@ def plan_fingerprint(plan: ReconciliationPlan) -> str:
 
 
 def validate_approval(plan: ReconciliationPlan, approval: Approval | None) -> None:
-    """Reject conflicts, initial plans, stale plans, or missing confirmation."""
+    """Reject conflicts, initial plans, or an approval for a different plan."""
 
     if plan.conflicts:
         raise DestructiveActionApprovalError("conflicts must be resolved before applying a plan")
@@ -39,5 +39,3 @@ def validate_approval(plan: ReconciliationPlan, approval: Approval | None) -> No
         return
     if approval is None or approval.plan_fingerprint != plan_fingerprint(plan):
         raise DestructiveActionApprovalError("the approval does not match the current plan")
-    if plan.requires_approval and approval.confirmation != "APPLY DESTRUCTIVE CHANGES":
-        raise DestructiveActionApprovalError("explicit destructive-action confirmation is required")

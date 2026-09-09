@@ -22,10 +22,12 @@ def _track_to_dict(track: TrackState) -> dict[str, object]:
         "title": track.title,
         "artists": list(track.artists),
         "source_provider_track_id": track.source_provider_track_id,
+        "album": track.album,
         "duration_ms": track.duration_ms,
         "isrc": track.isrc,
         "occurrence_id": track.occurrence_id,
         "position": track.position,
+        "explicit": track.explicit,
     }
 
 
@@ -35,10 +37,12 @@ def _track_from_dict(track: dict[str, object]) -> TrackState:
         title=str(track["title"]),
         artists=tuple(str(artist) for artist in track["artists"]),
         source_provider_track_id=str(track["source_provider_track_id"]),
+        album=str(track["album"]) if track.get("album") else None,
         duration_ms=track.get("duration_ms"),
         isrc=track.get("isrc"),
         occurrence_id=track.get("occurrence_id"),
         position=track.get("position"),
+        explicit=track.get("explicit") if isinstance(track.get("explicit"), bool) else None,
     )
 
 

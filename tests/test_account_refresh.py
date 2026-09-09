@@ -5,11 +5,12 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session
 
 from ops.api import routes
+from ops.auth.youtube_music import YOUTUBE_MUSIC_AUTH_SCHEME
 from ops.config import Settings
 from ops.db import Base
 from ops.models import ProviderAccount
 from ops.providers.spotify import SpotifyProvider
-from ops.providers.youtube_music import YouTubeMusicProvider
+from ops.providers.youtube_music import YTMusicApiProvider
 from ops.security.crypto import CredentialCipher
 from ops.storage.repositories import ProviderAccountRepository
 
@@ -55,14 +56,22 @@ def test_playlist_picker_refreshes_expired_spotify_token(monkeypatch) -> None:
     engine.dispose()
 
 
-def test_playlist_picker_refreshes_expired_youtube_token(monkeypatch) -> None:
+def test_playlist_picker_refreshes_expired_ytmusicapi_token(monkeypatch) -> None:
     class FakeYouTubeMusicAuthService:
         def __init__(self, client_id: str, client_secret: str) -> None:
             assert (client_id, client_secret) == ("client-id", "client-secret")
 
         def refresh_token(self, refresh_token: str) -> dict[str, object]:
             assert refresh_token == "refresh-token"
-            return {"access_token": "new-access-token", "expires_in": 3600}
+            return {
+                "auth_scheme": YOUTUBE_MUSIC_AUTH_SCHEME,
+                "access_token": "new-access-token",
+                "refresh_token": "refresh-token",
+                "scope": "https://www.googleapis.com/auth/youtube",
+                "token_type": "Bearer",
+                "expires_at": 4_102_444_800,
+                "expires_in": 3600,
+            }
 
     monkeypatch.setattr(routes, "YouTubeMusicAuthService", FakeYouTubeMusicAuthService)
     engine = create_engine("sqlite://")
@@ -81,16 +90,17 @@ def test_playlist_picker_refreshes_expired_youtube_token(monkeypatch) -> None:
         repository.save_credentials(
             account,
             {
+                "auth_scheme": YOUTUBE_MUSIC_AUTH_SCHEME,
                 "access_token": "old-access-token",
                 "refresh_token": "refresh-token",
-                "expires_at": (datetime.now(UTC) - timedelta(seconds=1)).isoformat(),
+                "expires_at": 1,
             },
         )
         session.commit()
 
         provider = routes.provider_for_account(session, settings, account)
 
-        assert isinstance(provider, YouTubeMusicProvider)
-        assert provider.access_token == "new-access-token"
+        assert isinstance(provider, YTMusicApiProvider)
+        assert provider._credentials["access_token"] == "new-access-token"
         assert repository.load_credentials(account)["refresh_token"] == "refresh-token"
     engine.dispose()
