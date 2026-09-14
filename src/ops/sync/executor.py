@@ -74,6 +74,7 @@ class SyncExecutor:
         fail_on_unavailable: bool = False,
         pre_resolved_tracks: Mapping[int, ProviderTrack] | None = None,
         on_action_completed: Callable[[int], None] | None = None,
+        before_action: Callable[[], None] | None = None,
         on_track_resolved: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
         on_track_unavailable: Callable[[ReconciliationAction, ProviderTrack], None] | None = None,
     ) -> ExecutionResult:
@@ -102,6 +103,8 @@ class SyncExecutor:
             prepared.append((index, action, provider_track))
 
         for index, action, provider_track in prepared:
+            if before_action is not None:
+                before_action()
             provider = source_provider if action.side is Side.SOURCE else target_provider
             playlist_id = source_playlist_id if action.side is Side.SOURCE else target_playlist_id
             if action.action is ActionType.ADD_TRACK:

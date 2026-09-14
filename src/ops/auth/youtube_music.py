@@ -15,7 +15,8 @@ import requests
 from ytmusicapi.auth.oauth import OAuthCredentials
 from ytmusicapi.exceptions import YTMusicError
 
-from ops.providers.base import ProviderError
+from ops.providers.base import ProviderError, ProviderUnavailable
+from ops.providers.errors import NetworkFailure, http_failure
 
 YOUTUBE_MUSIC_OAUTH_SCOPE = "https://www.googleapis.com/auth/youtube"
 YOUTUBE_MUSIC_AUTH_SCHEME = "ytmusicapi_oauth"
@@ -102,6 +103,18 @@ def oauth_token_needs_refresh(credentials: Mapping[str, Any], *, now: int | None
     return expires_at <= timestamp + TOKEN_REFRESH_SKEW_SECONDS
 
 
+class OAuthSession(requests.Session):
+    """Bound OAuth I/O and preserve refresh HTTP status before SDK parsing."""
+
+    def request(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", 20)
+        response = super().request(method, url, **kwargs)
+        data = kwargs.get("data")
+        if isinstance(data, Mapping) and data.get("grant_type") == "refresh_token":
+            response.raise_for_status()
+        return response
+
+
 class YouTubeMusicAuthService:
     """Use Google's device OAuth helper without exposing provider errors."""
 
@@ -113,7 +126,9 @@ class YouTubeMusicAuthService:
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
-        self.credentials = credentials or OAuthCredentials(client_id, client_secret)
+        self.credentials = credentials or OAuthCredentials(
+            client_id, client_secret, session=OAuthSession()
+        )
 
     @staticmethod
     def _call(operation) -> Mapping[str, Any]:  # type: ignore[no-untyped-def]
@@ -141,5 +156,28 @@ class YouTubeMusicAuthService:
         return normalize_oauth_token(payload)
 
     def refresh_token(self, refresh_token: str) -> dict[str, Any]:
-        payload = self._call(lambda: self.credentials.refresh_token(refresh_token))
+        try:
+            payload = self.credentials.refresh_token(refresh_token)
+        except requests.RequestException as exc:
+            response = exc.response
+            if response is not None:
+                try:
+                    body = response.json()
+                    reason = body.get("error") if isinstance(body, Mapping) else None
+                except ValueError:
+                    reason = None
+                raise http_failure(
+                    response.status_code,
+                    reason=reason,
+                    token=True,
+                    retry=response.headers.get("Retry-After"),
+                ) from exc
+            raise NetworkFailure("Google renewal could not be reached") from exc
+        except (YTMusicError, ValueError, TypeError) as exc:
+            # SDK exceptions do not establish revocation: keep recovery automatic.
+            raise ProviderUnavailable("Google renewal is temporarily unavailable") from exc
+        if isinstance(payload, Mapping) and payload.get("error"):
+            raise http_failure(400, reason=str(payload["error"]), token=True)
+        if not isinstance(payload, Mapping):
+            raise ProviderUnavailable("Google returned an incomplete renewal response")
         return normalize_oauth_token(payload, previous_refresh_token=refresh_token)

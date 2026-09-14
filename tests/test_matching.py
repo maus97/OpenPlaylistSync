@@ -11,14 +11,18 @@ def test_matcher_prefers_exact_title_artist_and_duration() -> None:
     assert choose_best_candidate(requested, (unrelated, exact)) == exact
 
 
-def test_matcher_rejects_ambiguous_or_low_confidence_results() -> None:
+def test_matcher_chooses_highest_ranked_viable_ambiguous_result() -> None:
     requested = ProviderTrack("spotify:one", "Song", ("Artist",))
     equally_good = (
         ProviderTrack("youtube:one", "Song", ("Artist",)),
         ProviderTrack("youtube:two", "Song", ("Artist",)),
     )
 
-    assert choose_best_candidate(requested, equally_good) is None
+    assert choose_best_candidate(requested, equally_good) == equally_good[0]
+
+
+def test_matcher_rejects_results_without_viable_identity_evidence() -> None:
+    requested = ProviderTrack("spotify:1", "Song", ("Artist",))
     assert (
         choose_best_candidate(requested, (ProviderTrack("youtube:x", "Else", ("Other",)),)) is None
     )

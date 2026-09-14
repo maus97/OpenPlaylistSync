@@ -1,3 +1,4 @@
+import json
 import logging
 import re
 from collections.abc import Generator
@@ -100,7 +101,7 @@ def _complete_setup(client: TestClient, settings: Settings) -> str:
 
 
 def test_playlist_page_survives_expired_google_refresh(tmp_path, monkeypatch):
-    from ops.auth.youtube_music import YouTubeMusicOAuthError
+    from ops.providers.base import AuthorizationRequired
 
     client, factory, settings = _isolated_client(tmp_path, monkeypatch)
     with client:
@@ -117,17 +118,15 @@ def test_playlist_page_survives_expired_google_refresh(tmp_path, monkeypatch):
             session.commit()
 
         def expired(*args):
-            raise YouTubeMusicOAuthError(
-                "Google authorization expired; start the connection again."
-            )
+            raise AuthorizationRequired("Google authorization expired; start the connection again.")
 
         monkeypatch.setattr(routes, "provider_for_account", expired)
         monkeypatch.setattr(routes, "load_app_settings", lambda _: settings)
         response = client.get("/pairs")
         assert response.status_code == 200
-        assert "Google authorization expired" in response.text
+        assert "Authorization could not be renewed" in response.text
         assert "Connect YouTube Music" in response.text
-        assert "Connection needs attention" in response.text
+        assert "Service status" in response.text
 
 
 def test_automatic_settings_preserve_secrets_and_require_csrf(tmp_path, monkeypatch):
@@ -217,6 +216,65 @@ def test_activity_shows_the_reviewed_change_details(tmp_path, monkeypatch):
         assert response.status_code == 200
         assert "Added to YouTube Music" in response.text
         assert "Afterglow" in response.text
+
+
+def test_activity_shows_nonblocking_auto_match_and_unmatched_evidence(tmp_path, monkeypatch):
+    client, factory, settings = _isolated_client(tmp_path, monkeypatch)
+    with client:
+        _complete_setup(client, settings)
+        with factory() as session:
+            session.add(
+                SyncRun(
+                    status="applied_with_skips",
+                    summary_json=json.dumps(
+                        {
+                            "auto_matches": [
+                                {
+                                    "requested": {
+                                        "title": "Girlfriend",
+                                        "artists": ["Avril Lavigne"],
+                                    },
+                                    "selected": {
+                                        "title": "Girlfriend",
+                                        "artists": ["Avril Lavigne"],
+                                    },
+                                    "source_provider": "spotify",
+                                    "destination_provider": "youtube_music",
+                                    "matching_score": 103.0,
+                                    "reason": "top candidates had similar scores",
+                                    "alternatives": [
+                                        {
+                                            "track": {
+                                                "title": "Girlfriend (Mandarin Version)",
+                                                "artists": ["Avril Lavigne"],
+                                            },
+                                            "matching_score": 100.0,
+                                        }
+                                    ],
+                                }
+                            ],
+                            "unmatched_tracks": [
+                                {
+                                    "title": "Unavailable song",
+                                    "artists": ["Artist"],
+                                    "reason": "no viable destination candidate",
+                                }
+                            ],
+                        }
+                    ),
+                )
+            )
+            session.commit()
+
+        response = client.get("/runs")
+        assert response.status_code == 200
+        assert "auto-matched — review suggested" in response.text
+        assert "Girlfriend → Girlfriend" in response.text
+        assert "score 103.0" in response.text
+        assert "Girlfriend (Mandarin Version)" in response.text
+        assert "score 100.0" in response.text
+        assert "unmatched and skipped" in response.text
+        assert "Unavailable song" in response.text
 
 
 def test_activity_hides_no_change_scheduled_previews(tmp_path, monkeypatch):

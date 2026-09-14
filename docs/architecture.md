@@ -162,8 +162,9 @@ playlist and track types:
 
 Provider IDs remain opaque strings. The synchronization engine must never infer
 that a Spotify ID and a YouTube Music ID are interchangeable. Track matching
-needs a normalized identity with an explicit confidence policy; unresolved
-matches must be surfaced for review instead of silently discarded.
+needs a normalized identity with an explicit viability policy. The highest-ranked
+viable result is recorded for retrospective review; a track with no viable result
+is explicitly skipped rather than guessed.
 
 ## Three-way reconciliation model
 
@@ -186,20 +187,25 @@ The engine combines those changes into a plan:
 - the initial run has no trusted baseline, so it must produce a non-destructive
   preview/import plan.
 
-The baseline is advanced only after all selected operations succeed and the
-resulting snapshots are persisted. Failed or partially applied runs must remain
-visible and must not become the next baseline.
+The baseline is advanced after all selected operations succeed and the resulting
+snapshots are persisted. A controlled, explicitly journaled no-match skip may
+also be baselined so one unavailable catalogue item does not retry forever.
+Failed or uncertain partially applied runs remain visible and must not become
+the next baseline.
 
 The execution path records a `sync_run` and one `sync_action` entry per provider
 operation before the first write. An action is marked complete immediately after
 its provider call. A failed action leaves the run and its completed predecessors
 visible for review; OPS never advances the baseline for that run.
 
-When a provider cannot verify an exact match, a review may include a small,
-persisted list of close candidates. These alternatives are never selected
-automatically: the operator must choose one in the review UI, and OPS verifies
-that the submitted provider ID was among that review's stored options before it
-becomes eligible for apply.
+When strict matching cannot distinguish several viable recordings, OPS uses the
+provider's existing ranking to select the highest-scoring candidate. The selected
+ID, score, alternatives, providers and ambiguity reason remain in run history;
+the saved provider mapping can be replaced later through Matches. Candidates
+that fail the provider's title/artist identity checks are not selected. If none
+is viable, only that action is skipped and journaled while unrelated actions
+continue. An optional manual choice is still validated against the persisted,
+bounded candidate set.
 
 ## Persistence direction
 
@@ -296,10 +302,12 @@ required. Source and target are labels, not permanent authority: later changes
 reconcile bidirectionally against the successful baseline.
 
 Automatic work uses normal prepare/apply, one-time plan tokens, pair leases,
-state-hash revalidation, strict resolution, occurrence guards, and action journals.
-First sync and baseline upgrades remain manual. Unresolved matches/conflicts
-block the whole automatic apply. Uncertain writes since the last baseline require
-manual recovery rather than blind retries. Per-side removals exceeding 10 tracks
+state-hash revalidation, provider-ranked viable resolution, occurrence guards,
+and action journals. First sync and baseline upgrades remain manual. Ambiguous
+viable matches are applied and marked for optional retrospective review. A track
+with no viable result is skipped individually and recorded; conflicts still block
+the batch. Uncertain writes since the last baseline require manual recovery rather
+than blind retries. Per-side removals exceeding 10 tracks
 or 25% of the baseline (one-track minimum), and removals emptying a side, require
 manual review. Failures on one pair do not stop checks for other pairs. The
 Activity review and sanitized scheduler logs provide investigation evidence.
@@ -312,8 +320,8 @@ Activity review and sanitized scheduler logs provide investigation evidence.
 2. **HTTPS ownership:** OPS enforces secure cookies and HSTS when configured for
    production, but certificate issuance and reverse-proxy policy remain an
    operator deployment responsibility.
-3. **Track identity and matching policy:** define exact-match fields, fuzzy
-   matching thresholds, manual resolution, and behavior for unavailable tracks.
+3. **Track identity and matching policy:** monitor real-world ranking quality,
+   viability thresholds, retrospective corrections, and unavailable-track trends.
 4. **Conflict policy:** decide whether conflicts pause a run, create a review
    queue, or allow a per-playlist preference.
 5. **Spotify duplicate deletion:** the current Spotify API cannot target a
@@ -321,6 +329,44 @@ Activity review and sanitized scheduler logs provide investigation evidence.
    removals and asks the operator to resolve the occurrence manually.
 6. **Baseline storage scale:** validate JSON snapshots with realistic playlist
    sizes before committing to normalized tables or a hybrid schema.
-7. **Scheduler behavior:** opt-in automatic ticks and fail-closed recovery are
-   implemented; durable notifications and adaptive provider backoff remain future
-   improvements. OPS must stay running for scheduled checks to happen.
+7. **Scheduler behavior:** opt-in automatic ticks, scoped retry backoff and
+   fail-closed interrupted-write recovery are implemented. OPS must stay running
+   for scheduled checks to happen; durable notifications remain future work.
+
+## Provider health and historical runs
+
+Sync-run status is historical evidence, not current connection health. Account
+verification timestamps and scoped provider incidents persist independently of runs.
+Authentication recovery resolves only that account's older authentication incidents;
+resource permissions require a successful operation on the same resource. Legacy
+unattributed auth failures require both bound accounts verified after the failure.
+Scheduled retries consult unresolved incidents and their persisted retry deadlines.
+Recovery never queues work: the next configured scheduler tick uses the existing
+pair lease. Refresh uses an account lease and a ciphertext compare-and-swap so a
+concurrent reconnect cannot be overwritten by an old token refresh.
+
+## Automatic scheduler reliability
+
+Each scheduler tick enumerates pairs independently, then uses a fresh transaction
+per pair. The automatic-job lease spans review and Apply; the existing operation
+lease excludes concurrent manual mutations. All lease releases are conditional on
+ownership. Expired owners cannot renew or send the next write. Interrupted reviews
+are retryable; interrupted Apply with a write journal remains explicitly blocked
+because a provider may have accepted an unacknowledged request. Never replay that
+journal blindly or advance the baseline to conceal uncertainty.
+
+Nullable automatic_* fields on sync_pairs preserve check/attempt/success times,
+outcomes and next-evaluation estimates across restarts. Ambiguous matches are not
+pair-level holds; their best viable results are applied and recorded. Conflicts,
+bulk removals and uncertain writes can still intentionally prevent Apply. These
+holds remain visible while scheduled reviews continue at the normal interval.
+Recovery clears only relevant incidents, not run history or safety holds.
+
+APScheduler retains the recurring timer after job exceptions. A separate watchdog
+restores missing/paused timers without launching duplicate work. Monotonic heartbeat
+age detects stalled cycles independently of timezone changes. /healthz fails only
+for local scheduler liveness loss, not ordinary provider errors; Docker's health
+status alone does not automatically restart an unhealthy container. The authenticated
+/system/scheduler endpoint reports the real next timer and completed heartbeat.
+The CSRF-protected check-now control advances the existing timer and does not change
+the configured interval, provider retry deadlines, consent or safety checks.

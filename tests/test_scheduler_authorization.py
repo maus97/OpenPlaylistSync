@@ -50,5 +50,5 @@ def test_automatic_pair_does_not_retry_immediately_after_authorization_failure()
             lambda *_: (_ for _ in ()).throw(AssertionError("provider should not be called")),
         )
 
-        assert run_automatic_pair(coordinator, pair) == "authorization needs attention"
+        assert run_automatic_pair(coordinator, pair) == "provider retry pending"
     engine.dispose()

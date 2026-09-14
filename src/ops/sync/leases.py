@@ -4,7 +4,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import Engine, or_, update
+from sqlalchemy import Engine, or_, select, update
 from sqlalchemy.orm import Session
 
 from ops.models import SyncPair
@@ -25,30 +25,46 @@ class PairLease:
     bind: Engine
     pair_id: int
     token: str
+    kind: str = "operation"
+
+    def assert_owned(self, session) -> None:
+        owned = session.scalar(
+            select(SyncPair.id).where(
+                SyncPair.id == self.pair_id,
+                getattr(SyncPair, f"{self.kind}_lock_token") == self.token,
+                getattr(SyncPair, f"{self.kind}_lock_expires_at") > datetime.now(UTC),
+            )
+        )
+        if owned is None:
+            raise PairLeaseLost("the synchronization lease expired; retry safely")
 
     def renew(self, duration: timedelta = PAIR_LEASE_DURATION) -> None:
+        token_column = getattr(SyncPair, f"{self.kind}_lock_token")
+        expires_column = getattr(SyncPair, f"{self.kind}_lock_expires_at")
         with Session(self.bind) as session:
             result = session.execute(
                 update(SyncPair)
                 .where(
                     SyncPair.id == self.pair_id,
-                    SyncPair.operation_lock_token == self.token,
+                    token_column == self.token,
+                    expires_column > datetime.now(UTC),
                 )
-                .values(operation_lock_expires_at=datetime.now(UTC) + duration)
+                .values(**{f"{self.kind}_lock_expires_at": datetime.now(UTC) + duration})
             )
             session.commit()
         if result.rowcount != 1:
             raise PairLeaseLost("the synchronization lease was lost; stop and review again")
 
     def release(self) -> None:
+        token_column = getattr(SyncPair, f"{self.kind}_lock_token")
         with Session(self.bind) as session:
             session.execute(
                 update(SyncPair)
                 .where(
                     SyncPair.id == self.pair_id,
-                    SyncPair.operation_lock_token == self.token,
+                    token_column == self.token,
                 )
-                .values(operation_lock_token=None, operation_lock_expires_at=None)
+                .values(**{f"{self.kind}_lock_token": None, f"{self.kind}_lock_expires_at": None})
             )
             session.commit()
 
@@ -57,10 +73,16 @@ def acquire_pair_lease(
     session: Session,
     pair_id: int,
     duration: timedelta = PAIR_LEASE_DURATION,
+    *,
+    kind: str = "operation",
 ) -> PairLease:
     """Atomically acquire a cross-process lease without holding a DB transaction open."""
 
     bind = session.get_bind()
+    if kind not in {"operation", "automatic"}:
+        raise ValueError("unsupported lease kind")
+    token_column = getattr(SyncPair, f"{kind}_lock_token")
+    expires_column = getattr(SyncPair, f"{kind}_lock_expires_at")
     token = secrets.token_urlsafe(32)
     now = datetime.now(UTC)
     with Session(bind) as lease_session:
@@ -69,18 +91,15 @@ def acquire_pair_lease(
             .where(
                 SyncPair.id == pair_id,
                 or_(
-                    SyncPair.operation_lock_token.is_(None),
-                    SyncPair.operation_lock_expires_at.is_(None),
-                    SyncPair.operation_lock_expires_at <= now,
+                    token_column.is_(None),
+                    expires_column.is_(None),
+                    expires_column <= now,
                 ),
             )
-            .values(
-                operation_lock_token=token,
-                operation_lock_expires_at=now + duration,
-            )
+            .values(**{f"{kind}_lock_token": token, f"{kind}_lock_expires_at": now + duration})
         )
         lease_session.commit()
     if result.rowcount != 1:
         raise PairOperationBusy("another review or synchronization is already running")
     session.expire_all()
-    return PairLease(bind=bind, pair_id=pair_id, token=token)
+    return PairLease(bind=bind, pair_id=pair_id, token=token, kind=kind)

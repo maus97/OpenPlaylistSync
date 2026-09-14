@@ -19,6 +19,24 @@ class ProviderTrack:
 
 
 @dataclass(frozen=True, slots=True)
+class ScoredCandidate:
+    """One provider-ranked candidate retained as safe matching evidence."""
+
+    track: ProviderTrack
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class AutomaticCandidateMatch:
+    """Best viable fallback selected after strict matching remains ambiguous."""
+
+    selected: ProviderTrack
+    score: float
+    alternatives: tuple[ScoredCandidate, ...]
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class ProviderPlaylist:
     """A normalized playlist snapshot returned by a provider adapter."""
 

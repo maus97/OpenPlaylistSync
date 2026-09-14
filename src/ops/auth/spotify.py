@@ -10,6 +10,8 @@ from urllib.parse import urlencode
 import httpx
 from authlib.common.security import generate_token
 
+from ops.providers.errors import NetworkFailure, http_failure
+
 SPOTIFY_AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 SPOTIFY_TOKEN_URL = "https://accounts.spotify.com/api/token"  # nosec B105
 SPOTIFY_SCOPES = (
@@ -77,12 +79,26 @@ class SpotifyOAuthService:
         return response.json()
 
     def refresh_token(self, refresh_token: str) -> dict[str, Any]:
-        response = self.client.post(
-            SPOTIFY_TOKEN_URL,
-            data={"grant_type": "refresh_token", "refresh_token": refresh_token},
-            auth=(self.config.client_id, self.config.client_secret),
-        )
-        response.raise_for_status()
+        try:
+            response = self.client.post(
+                SPOTIFY_TOKEN_URL,
+                data={"grant_type": "refresh_token", "refresh_token": refresh_token},
+                auth=(self.config.client_id, self.config.client_secret),
+            )
+        except httpx.HTTPError as exc:
+            raise NetworkFailure("Spotify renewal could not be reached") from exc
+        if response.status_code >= 400:
+            try:
+                payload = response.json()
+                reason = payload.get("error") if isinstance(payload, dict) else None
+            except ValueError:
+                reason = None
+            raise http_failure(
+                response.status_code,
+                reason=reason,
+                token=True,
+                retry=response.headers.get("Retry-After"),
+            )
         return response.json()
 
     def current_user(self, access_token: str) -> dict[str, Any]:

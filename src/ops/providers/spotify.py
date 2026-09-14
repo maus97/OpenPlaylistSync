@@ -3,13 +3,20 @@
 import re
 import unicodedata
 from collections.abc import Iterable, Sequence
+from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
 
-from ops.providers.base import AuthorizationRequired, ProviderUnavailable, RateLimited
-from ops.providers.types import ProviderPlaylist, ProviderTrack
+from ops.providers.base import AuthorizationRequired, ProviderUnavailable
+from ops.providers.errors import NetworkFailure, PermissionDenied, http_failure
+from ops.providers.types import (
+    AutomaticCandidateMatch,
+    ProviderPlaylist,
+    ProviderTrack,
+    ScoredCandidate,
+)
 
 _DISPLAY_METADATA = re.compile(
     r"\s*(?:\(|\[)?(?:official(?: music)? (?:video|audio)|official lyric video|"
@@ -55,6 +62,7 @@ class SpotifyProvider:
 
     def __init__(self, access_token: str | None = None, client: httpx.Client | None = None) -> None:
         self.access_token = access_token
+        self._token_refresher = None
         self.client = client or httpx.Client(base_url="https://api.spotify.com/v1", timeout=20)
         # A review may ask for both an automatic decision and a human fallback
         # for the same track.  Keep the provider read to one request in that
@@ -68,24 +76,37 @@ class SpotifyProvider:
             raise AuthorizationRequired("Spotify account needs to be connected")
         return {"Authorization": f"Bearer {self.access_token}"}
 
+    def set_token_refresher(self, refresher) -> None:
+        self._token_refresher = refresher
+
     def _request(self, method: str, url: str, **kwargs: Any) -> httpx.Response:
+        renewed = False
         headers = {**self._headers(), **kwargs.pop("headers", {})}
         try:
             response = self.client.request(method, url, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
-            raise ProviderUnavailable("Spotify could not be reached") from exc
+            raise NetworkFailure("Spotify could not be reached") from exc
+        if response.status_code == 401 and self._token_refresher is not None:
+            self.access_token = self._token_refresher(self.access_token)
+            renewed = True
+            headers.update(self._headers())
+            try:
+                response = self.client.request(method, url, headers=headers, **kwargs)
+            except httpx.HTTPError as exc:
+                raise NetworkFailure("Spotify could not be reached") from exc
         if response.status_code == 401:
-            raise AuthorizationRequired("Spotify authorization expired; reconnect the account")
+            exc = AuthorizationRequired("Spotify authorization expired; reconnect the account")
+            if renewed:
+                exc.operation_started_at = datetime.now(UTC)
+            raise exc
         if response.status_code == 403:
-            raise AuthorizationRequired(
-                "Spotify access is incomplete; reconnect Spotify and approve the requested access"
-            )
+            raise http_failure(403, write=method.upper() not in {"GET", "HEAD"})
         if response.status_code == 429:
-            retry_after = response.headers.get("Retry-After")
-            raise RateLimited(int(retry_after) if retry_after and retry_after.isdigit() else None)
+            raise http_failure(429, retry=response.headers.get("Retry-After"))
         if response.status_code >= 500:
             raise ProviderUnavailable("Spotify is temporarily unavailable")
-        response.raise_for_status()
+        if response.status_code >= 400:
+            raise http_failure(response.status_code, write=method.upper() not in {"GET", "HEAD"})
         return response
 
     @staticmethod
@@ -177,10 +198,10 @@ class SpotifyProvider:
                 f"/playlists/{raw_id}",
                 params={"fields": "id,name,description,snapshot_id", "market": "from_token"},
             ).json()
-        except AuthorizationRequired as exc:
-            raise AuthorizationRequired(
+        except PermissionDenied as exc:
+            raise PermissionDenied(
                 "Spotify denied access to this playlist. Make sure it is shared with the "
-                "connected Spotify account, then reconnect Spotify and approve playlist access."
+                "connected Spotify account and that playlist scopes are granted."
             ) from exc
         if not isinstance(payload, dict) or payload.get("id") != raw_id:
             raise ProviderUnavailable("Spotify returned an invalid playlist response")
@@ -202,8 +223,8 @@ class SpotifyProvider:
                     "limit": "50",
                 },
             ).json()
-        except AuthorizationRequired as exc:
-            raise AuthorizationRequired(
+        except PermissionDenied as exc:
+            raise PermissionDenied(
                 "Spotify allows OPS to see this playlist but not read its tracks. "
                 "The connected account must be the owner or a collaborator; "
                 "a view-only share or follow cannot be synchronized through Spotify's API."
@@ -503,6 +524,33 @@ class SpotifyProvider:
             cls._choose_search_candidate(requested, candidates, explicit_preference=preference)
             if requested
             else None
+        )
+
+    @classmethod
+    def best_available_match(
+        cls, track: ProviderTrack, candidates: Sequence[ProviderTrack]
+    ) -> AutomaticCandidateMatch | None:
+        """Choose the strongest plausible Spotify result after strict matching ties."""
+
+        requested = cls._search_metadata(track)
+        if requested is None:
+            return None
+        ranked = tuple(
+            ScoredCandidate(candidate, score)
+            for score, candidate in cls._ranked_candidates(requested, candidates)
+            if score >= 70.0
+        )
+        if not ranked:
+            return None
+        return AutomaticCandidateMatch(
+            selected=ranked[0].track,
+            score=ranked[0].score,
+            alternatives=ranked[1:5],
+            reason=(
+                "top candidates had similar Spotify matching scores"
+                if len(ranked) > 1 and ranked[0].score - ranked[1].score < 8.0
+                else "the best viable Spotify result was below the strict confidence threshold"
+            ),
         )
 
     def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:

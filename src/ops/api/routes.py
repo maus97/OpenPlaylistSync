@@ -14,12 +14,12 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import delete, select, update
 from sqlalchemy.orm import Session
 
+from ops.auth.credentials import credentials_for, enable_refresh
 from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
 from ops.auth.youtube_music import (
     YOUTUBE_MUSIC_AUTH_SCHEME,
     YouTubeMusicAuthService,
     YouTubeMusicOAuthError,
-    oauth_token_needs_refresh,
 )
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings, load_saved_settings, save_app_settings
@@ -27,6 +27,7 @@ from ops.db import get_db
 from ops.models import (
     LocalAdministrator,
     ProviderAccount,
+    ProviderIncident,
     ProviderSearchCache,
     ProviderTrackMapping,
     SyncAction,
@@ -36,6 +37,13 @@ from ops.models import (
 )
 from ops.providers.base import ProviderError
 from ops.providers.factory import create_provider
+from ops.providers.health import (
+    ObservedProvider,
+    legacy_unresolved,
+    pair_health,
+    record_failure,
+    verified,
+)
 from ops.providers.youtube_music import YTMusicApiProvider
 from ops.security.bootstrap import (
     BootstrapAuthorizationError,
@@ -229,90 +237,12 @@ def logout_local_administrator(
 
 
 def provider_for_account(session: Session, app_settings: Settings, account: ProviderAccount) -> Any:
-    """Build a provider for UI discovery without exposing credential payloads."""
-
-    if account.provider_name not in SUPPORTED_PROVIDERS:
-        raise ValueError(f"unsupported provider account: {account.provider_name}")
-    if not app_settings.credential_encryption_key:
-        raise ValueError("credential encryption is not configured")
-    cipher = CredentialCipher(app_settings.credential_encryption_key)
-    credentials = ProviderAccountRepository(session, cipher).load_credentials(account)
-    if account.provider_name == "spotify" and credentials.get("expires_at"):
-        try:
-            expires_at = datetime.fromisoformat(str(credentials["expires_at"])).astimezone(UTC)
-        except ValueError:
-            expires_at = datetime.now(UTC)
-        if expires_at <= datetime.now(UTC):
-            refresh_token = credentials.get("refresh_token")
-            if (
-                not refresh_token
-                or not app_settings.spotify_client_id
-                or not app_settings.spotify_client_secret
-            ):
-                raise ValueError("Spotify authorization expired; reconnect the account")
-            refreshed = SpotifyOAuthService(
-                SpotifyOAuthConfig(
-                    app_settings.spotify_client_id,
-                    app_settings.spotify_client_secret,
-                    app_settings.spotify_redirect_uri,
-                )
-            ).refresh_token(str(refresh_token))
-            credentials = {
-                **credentials,
-                **refreshed,
-                "refresh_token": refreshed.get("refresh_token", refresh_token),
-                "expires_at": (
-                    datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
-                ).isoformat(),
-            }
-            ProviderAccountRepository(session, cipher).save_credentials(account, credentials)
-            session.commit()
-    if account.provider_name == "youtube_music":
-        credentials = _refresh_youtube_music_credentials(
-            session, app_settings, account, credentials
-        )
-        if not app_settings.ytmusic_client_id or not app_settings.ytmusic_client_secret:
-            raise ValueError("YouTube Music OAuth settings are incomplete")
-        credentials = {
-            **credentials,
-            "_ytmusic_client_id": app_settings.ytmusic_client_id,
-            "_ytmusic_client_secret": app_settings.ytmusic_client_secret,
-        }
-    return create_provider(account, credentials)
-
-
-def _refresh_youtube_music_credentials(
-    session: Session,
-    app_settings: Settings,
-    account: ProviderAccount,
-    credentials: dict[str, Any],
-) -> dict[str, Any]:
-    """Refresh OPS's encrypted Google token before YouTube API operations."""
-
-    if credentials.get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME:
-        raise ValueError("YouTube Music needs to be reconnected for the current OAuth integration")
-    if not oauth_token_needs_refresh(credentials):
-        return credentials
-    refresh_token = credentials.get("refresh_token")
-    if (
-        not refresh_token
-        or not app_settings.ytmusic_client_id
-        or not app_settings.ytmusic_client_secret
-    ):
-        raise ValueError("YouTube Music authorization expired; reconnect the account")
-    refreshed = YouTubeMusicAuthService(
-        app_settings.ytmusic_client_id, app_settings.ytmusic_client_secret
-    ).refresh_token(str(refresh_token))
-    merged = {
-        **credentials,
-        **refreshed,
-        "refresh_token": refreshed.get("refresh_token", refresh_token),
-    }
-    ProviderAccountRepository(
-        session, CredentialCipher(app_settings.credential_encryption_key or "")
-    ).save_credentials(account, merged)
-    session.commit()
-    return merged
+    """Create an adapter using the same renewal path as scheduled synchronization."""
+    services = {"spotify_service": SpotifyOAuthService, "youtube_service": YouTubeMusicAuthService}
+    credentials = credentials_for(session, app_settings, account, **services)
+    return enable_refresh(
+        create_provider(account, credentials), session, app_settings, account, **services
+    )
 
 
 @router.get("/", response_class=HTMLResponse, include_in_schema=False)
@@ -563,10 +493,30 @@ def change_local_administrator_password(
 
 
 @router.get("/healthz", tags=["system"])
-def healthz() -> dict[str, str]:
+def healthz(request: Request) -> dict[str, str]:
     """Return a cheap process health response without requiring provider access."""
 
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler is not None and not scheduler.snapshot()["healthy"]:
+        raise HTTPException(status_code=503, detail="background scheduler needs attention")
     return {"status": "ok", "service": "open-playlist-sync"}
+
+
+@router.get("/system/scheduler", include_in_schema=False)
+def scheduler_status(request: Request) -> dict:
+    """Authenticated process diagnostics; no credentials or provider calls."""
+    scheduler = getattr(request.app.state, "scheduler", None)
+    return scheduler.snapshot() if scheduler else {"state": "not started", "healthy": False}
+
+
+@router.post("/system/scheduler/check", include_in_schema=False)
+def scheduler_check(
+    request: Request, _: Annotated[None, Depends(require_csrf)] = None
+) -> RedirectResponse:
+    scheduler = getattr(request.app.state, "scheduler", None)
+    if scheduler:
+        scheduler.request_check()
+    return RedirectResponse("/pairs", status_code=303)
 
 
 @router.post("/auth/spotify/start", include_in_schema=False)
@@ -640,6 +590,7 @@ def spotify_callback(
     token["expires_at"] = (
         datetime.now(UTC) + timedelta(seconds=int(token.get("expires_in", 3600)))
     ).isoformat()
+    verification_started = datetime.now(UTC)
     profile = service.current_user(token["access_token"])
     account_repo = ProviderAccountRepository(
         session, CredentialCipher(app_settings.credential_encryption_key)
@@ -661,6 +612,7 @@ def spotify_callback(
         account = ProviderAccount(provider_name="spotify", external_account_id=profile["id"])
     account.display_name = str(profile.get("display_name") or profile["id"])
     account_repo.save_credentials(account, token)
+    verified(session, account.id, verification_started, operation="reconnect")
     session.commit()
     return RedirectResponse("/pairs?connected=spotify", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -732,6 +684,7 @@ def youtube_music_complete(
         client_secret=app_settings.ytmusic_client_secret,
     )
     try:
+        verification_started = datetime.now(UTC)
         external_account_id, display_name = identity.account_identity()
     except ProviderError as exc:
         cause = exc.__cause__
@@ -855,6 +808,7 @@ def youtube_music_complete(
         )
     account.display_name = display_name
     account_repo.save_credentials(account, token)
+    verified(session, account.id, verification_started, operation="reconnect")
     session.commit()
     return RedirectResponse("/pairs?connected=youtube_music", status_code=status.HTTP_303_SEE_OTHER)
 
@@ -914,7 +868,52 @@ def recent_runs(
                             "status": statuses.get(ordinal, "planned"),
                         }
                     )
-        activity.append({"run": run, "events": events})
+        import json
+
+        try:
+            run_summary = json.loads(run.summary_json or "{}")
+        except (ValueError, TypeError):
+            run_summary = {}
+        if not isinstance(run_summary, dict):
+            run_summary = {}
+        auto_matches = (
+            [item for item in run_summary.get("auto_matches", ()) if isinstance(item, dict)]
+            if isinstance(run_summary.get("auto_matches", ()), (list, tuple))
+            else []
+        )
+        unmatched_tracks = (
+            [item for item in run_summary.get("unmatched_tracks", ()) if isinstance(item, dict)]
+            if isinstance(run_summary.get("unmatched_tracks", ()), (list, tuple))
+            else []
+        )
+        error = dict(run_summary)
+        if not error.get("error"):
+            error = {}
+        incident = (
+            session.get(ProviderIncident, error["incident_id"])
+            if error.get("incident_id")
+            else None
+        )
+        error["resolution"] = (
+            ("Resolved" if incident.resolved_at else "Unresolved")
+            if incident
+            else (
+                "Superseded after connection verification"
+                if run.pair_id in pairs
+                and run.status == "authorization_required"
+                and not legacy_unresolved(session, pairs[run.pair_id], run)
+                else "Historical"
+            )
+        )
+        activity.append(
+            {
+                "run": run,
+                "events": events,
+                "error": error,
+                "auto_matches": auto_matches,
+                "unmatched_tracks": unmatched_tracks,
+            }
+        )
         if len(activity) == 25:
             break
     return templates.TemplateResponse(
@@ -998,18 +997,51 @@ def pairs(
     playlist_options = []
     for account in accounts:
         try:
-            provider = provider_for_account(session, app_settings, account)
+            provider = ObservedProvider(
+                provider_for_account(session, app_settings, account), session, account.id
+            )
             playlists = provider.list_playlists()
+            session.commit()
         except (ProviderError, ValueError) as exc:
             playlists = ()
-            provider_errors[account.id] = str(exc)
+            session.rollback()
+            exc.account_id = account.id
+            exc.provider = account.provider_name
+            info = record_failure(session, exc)
+            session.commit()
+            provider_errors[account.id] = info["error"]
         playlist_options.append({"account": account, "playlists": playlists})
+    for account in accounts:
+        active = list(
+            session.scalars(
+                select(ProviderIncident)
+                .where(
+                    ProviderIncident.account_id == account.id,
+                    ProviderIncident.resolved_at.is_(None),
+                )
+                .order_by(ProviderIncident.occurred_at.desc())
+            )
+        )
+        auth_problem = any(i.category == "authentication" for i in active)
+        provider_status[account.provider_name]["health_label"] = (
+            "requires reconnection"
+            if auth_problem
+            else "connected; sync access needs attention"
+            if active
+            else "connected and verified"
+            if account.verified_at
+            else "connected; not yet verified"
+        )
     account_by_id = {account.id: account for account in accounts}
     playlist_names = {
         (group["account"].id, playlist.provider_playlist_id): playlist.name
         for group in playlist_options
         for playlist in group["playlists"]
     }
+    scheduler = getattr(request.app.state, "scheduler", None)
+    scheduler_state = (
+        scheduler.snapshot() if scheduler else {"state": "not started", "next_tick": None}
+    )
     configured_pairs = []
     for pair in SyncPairRepository(session).all():
         source_account = account_by_id.get(pair.source_account_id)
@@ -1019,19 +1051,25 @@ def pairs(
         latest = SyncRunRepository(session).latest_for_pair(pair.id)
         pair_status = "Ready" if pair.enabled else "Paused"
         pair_detail = ""
-        if pair.enabled and latest is not None:
-            if latest.status == "authorization_required":
-                pair_status = "Connection needs attention"
-                pair_detail = (
-                    "OPS retries access after one hour. If access remains blocked, "
-                    "reconnect the service, then click Review to check immediately."
-                )
-            elif latest.status in {"failed", "partially_applied", "review_failed", "conflict"}:
+        if pair.enabled:
+            health = pair_health(session, pair, latest)
+            if health:
+                pair_status, pair_detail = health
+            elif latest and latest.status in {
+                "failed",
+                "partially_applied",
+                "review_failed",
+                "conflict",
+            }:
                 pair_status = "Review needed"
                 pair_detail = "Open Activity or create a new review for details."
-            elif latest.status in {"preparing", "applying"}:
+            elif latest and latest.status in {"preparing", "applying"}:
                 pair_status = "Working"
         automatic = automation_binding(pair) in app_settings.automatic_sync_bindings
+        if automatic and pair.enabled and not pair_health(session, pair, latest):
+            if pair.automatic_outcome and pair.automatic_outcome.startswith("manual"):
+                pair_status = "Review needed"
+                pair_detail = pair.automatic_outcome.replace("manual", "Manual", 1)
         schedule_detail = (
             "Scheduled checks off"
             if not app_settings.scheduler_enabled
@@ -1055,6 +1093,9 @@ def pairs(
                 "status": pair_status,
                 "status_detail": pair_detail,
                 "schedule_detail": schedule_detail,
+                "automatic_outcome": pair.automatic_outcome,
+                "automatic_attempted_at": pair.automatic_attempted_at,
+                "automatic_succeeded_at": pair.automatic_succeeded_at,
             }
         )
     return templates.TemplateResponse(
@@ -1062,6 +1103,7 @@ def pairs(
         name="pairs.html",
         context={
             "accounts": accounts,
+            "scheduler_state": scheduler_state,
             "pairs": configured_pairs,
             "playlist_options": playlist_options,
             "provider_status": provider_status,
@@ -1383,6 +1425,7 @@ def delete_pair(
     session.execute(delete(SyncRun).where(SyncRun.id.in_(run_ids)))
     session.execute(delete(SyncBaseline).where(SyncBaseline.pair_id == pair.id))
     session.execute(delete(ProviderTrackMapping).where(ProviderTrackMapping.pair_id == pair.id))
+    session.execute(delete(ProviderIncident).where(ProviderIncident.pair_id == pair.id))
     session.delete(pair)
     session.commit()
     return RedirectResponse("/pairs", status_code=status.HTTP_303_SEE_OTHER)

@@ -193,7 +193,6 @@ class SyncRunRepository:
                             "conflict",
                             "baseline_upgrade",
                             "expired",
-                            "review_failed",
                         )
                     ),
                 )

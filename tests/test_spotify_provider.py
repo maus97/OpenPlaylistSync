@@ -3,7 +3,7 @@ from dataclasses import replace
 import httpx
 import pytest
 
-from ops.providers.base import AuthorizationRequired, ProviderUnavailable
+from ops.providers.base import ProviderUnavailable
 from ops.providers.spotify import SpotifyProvider
 from ops.providers.types import ProviderTrack
 
@@ -147,7 +147,9 @@ def test_spotify_provider_creates_a_private_playlist_through_current_me_endpoint
     )
 
 
-def test_spotify_provider_explains_forbidden_access_as_a_reconnect_request() -> None:
+def test_spotify_provider_explains_forbidden_access_as_permissions() -> None:
+    from ops.providers.errors import PermissionDenied
+
     provider = SpotifyProvider(
         access_token="token",
         client=httpx.Client(
@@ -156,11 +158,13 @@ def test_spotify_provider_explains_forbidden_access_as_a_reconnect_request() -> 
         ),
     )
 
-    with pytest.raises(AuthorizationRequired, match="reconnect Spotify"):
+    with pytest.raises(PermissionDenied, match="granted scopes"):
         provider.list_playlists()
 
 
 def test_spotify_provider_explains_playlist_specific_forbidden_access() -> None:
+    from ops.providers.errors import PermissionDenied
+
     calls = 0
 
     def handler(_: httpx.Request) -> httpx.Response:
@@ -178,7 +182,7 @@ def test_spotify_provider_explains_playlist_specific_forbidden_access() -> None:
         ),
     )
 
-    with pytest.raises(AuthorizationRequired, match="owner or a collaborator"):
+    with pytest.raises(PermissionDenied, match="owner or a collaborator"):
         provider.get_playlist("spotify:playlist-1")
 
 
@@ -521,6 +525,13 @@ def test_spotify_provider_offers_distinct_ambiguous_recordings_once_for_manual_r
         "spotify:release-one-duplicate",
     ]
     assert len(requests) == 1
+
+    best = SpotifyProvider.best_available_match(
+        requested, provider.close_track_candidates(requested)
+    )
+    assert best is not None
+    assert best.selected.provider_track_id == "spotify:release-two"
+    assert "similar" in best.reason
 
 
 def test_spotify_provider_uses_exact_album_to_resolve_distinct_recordings() -> None:
