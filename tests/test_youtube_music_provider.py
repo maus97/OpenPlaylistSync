@@ -762,6 +762,48 @@ def test_ytmusicapi_keeps_distinct_same_title_recordings_ambiguous() -> None:
     assert YTMusicApiProvider._choose_search_candidate(requested, (single, album)) is None
 
 
+def test_ytmusicapi_best_available_match_prefers_exact_girlfriend_recording() -> None:
+    requested = ProviderTrack(
+        "spotify:girlfriend",
+        "Girlfriend",
+        ("Avril Lavigne",),
+        album="The Best Damn Thing (Expanded Edition)",
+        duration_ms=216_600,
+        explicit=True,
+    )
+    exact = ProviderTrack(
+        "youtube_music:exact",
+        "Girlfriend",
+        ("Avril Lavigne",),
+        album="Girlfriend EP",
+        duration_ms=218_000,
+        explicit=True,
+    )
+    mandarin = ProviderTrack(
+        "youtube_music:mandarin",
+        "Girlfriend (Mandarin Version - Explicit)",
+        ("Avril Lavigne",),
+        album="Girlfriend EP",
+        duration_ms=219_000,
+        explicit=True,
+    )
+
+    assert YTMusicApiProvider._choose_search_candidate(requested, (mandarin, exact)) is None
+    best = YTMusicApiProvider.best_available_match(requested, (mandarin, exact))
+    assert best is not None
+    assert best.selected == exact
+    assert best.score > best.alternatives[0].score
+
+
+def test_ytmusicapi_best_available_match_rejects_wrong_artist() -> None:
+    requested = ProviderTrack("spotify:song", "You Found Me", ("The Fray",))
+    wrong_artist = ProviderTrack(
+        "youtube_music:wrong", "You Found Me", ("Matt Bazinet",), duration_ms=243_000
+    )
+
+    assert YTMusicApiProvider.best_available_match(requested, (wrong_artist,)) is None
+
+
 def test_ytmusicapi_enriches_one_ambiguous_track_with_public_release_metadata() -> None:
     catalogue = FakeYTMusic()
     catalogue.watch_playlist = {

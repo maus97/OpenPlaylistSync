@@ -526,6 +526,13 @@ def test_spotify_provider_offers_distinct_ambiguous_recordings_once_for_manual_r
     ]
     assert len(requests) == 1
 
+    best = SpotifyProvider.best_available_match(
+        requested, provider.close_track_candidates(requested)
+    )
+    assert best is not None
+    assert best.selected.provider_track_id == "spotify:release-two"
+    assert "similar" in best.reason
+
 
 def test_spotify_provider_uses_exact_album_to_resolve_distinct_recordings() -> None:
     requested = ProviderTrack(

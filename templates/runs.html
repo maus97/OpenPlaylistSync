@@ -3,9 +3,61 @@
 {% block title %}Runs{% endblock %}
 
 {% block content %}
-<section class="hero compact-hero"><div><p class="eyebrow">ACTIVITY</p><h1>Sync history.</h1><p class="lede">Each preview, baseline, and applied change is recorded here.</p></div><div class="hero-orb orb-green" aria-hidden="true"></div></section>
+<section class="hero compact-hero">
+  <div><p class="eyebrow">ACTIVITY</p><h1>Sync history.</h1><p class="lede">Each preview, baseline, and applied change is recorded here.</p></div>
+  <div class="hero-orb orb-green" aria-hidden="true"></div>
+</section>
 <section class="card">
-  <div class="section-heading"><div><p class="eyebrow">RECENT</p><h2>Sync runs</h2></div><a class="button ghost" href="/pairs">Open playlists</a></div>
-  {% if activity %}<div class="table-wrap"><table><thead><tr><th>ID</th><th>Status</th><th>Started</th><th>Finished</th><th>Changes</th></tr></thead><tbody>{% for item in activity %}{% set run = item.run %}<tr><td>#{{ run.id }}</td><td><span class="status-dot {{ 'inactive' if run.status in ['failed', 'conflict'] else 'active' }}"></span>{{ run.status|replace('_', ' ')|title }}{% if item.error.error %}<p class="field-help">{{ item.error.provider|default('Provider unknown', true)|replace('_', ' ')|title }} · {{ item.error.category|default('unclassified', true)|replace('_', ' ') }}{% if item.error.operation %} · {{ item.error.operation|replace('_', ' ') }}{% endif %}<br>{{ item.error.error }}<br>{{ item.error.resolution }}</p>{% endif %}</td><td>{{ run.started_at }}</td><td>{{ run.completed_at or "–" }}</td><td>{% if item.events %}<details><summary>{{ item.events|length }} change{{ '' if item.events|length == 1 else 's' }}</summary><ul class="activity-events">{% for event in item.events %}<li><strong>{{ event.operation }} {{ event.destination }}</strong>: {{ event.track }}{% if event.artists %} · {{ event.artists }}{% endif %}<span class="field-note">{{ event.status }}</span></li>{% endfor %}</ul></details>{% else %}–{% endif %}</td></tr>{% endfor %}</tbody></table></div><p class="field-help">OPS records the exact reviewed plan and each provider write. One-click undo/redo is intentionally not shown yet: it must first re-check the current playlist so it cannot undo a later manual change or remove the wrong duplicate occurrence.</p>{% else %}<div class="empty-state"><span class="empty-icon">✦</span><h3>No activity yet</h3><p>Create a pair, then review its first sync.</p></div>{% endif %}
+  <div class="section-heading">
+    <div><p class="eyebrow">RECENT</p><h2>Sync runs</h2></div>
+    <a class="button ghost" href="/pairs">Open playlists</a>
+  </div>
+  {% if activity %}
+  <div class="table-wrap">
+    <table>
+      <thead><tr><th>ID</th><th>Status</th><th>Started</th><th>Finished</th><th>Changes</th></tr></thead>
+      <tbody>
+        {% for item in activity %}
+        {% set run = item.run %}
+        <tr>
+          <td>#{{ run.id }}</td>
+          <td>
+            <span class="status-dot {{ 'inactive' if run.status in ['failed', 'conflict'] else 'active' }}"></span>{{ run.status|replace('_', ' ')|title }}
+            {% if item.error.error %}<p class="field-help">{{ item.error.provider|default('Provider unknown', true)|replace('_', ' ')|title }} · {{ item.error.category|default('unclassified', true)|replace('_', ' ') }}{% if item.error.operation %} · {{ item.error.operation|replace('_', ' ') }}{% endif %}<br>{{ item.error.error }}<br>{{ item.error.resolution }}</p>{% endif %}
+          </td>
+          <td>{{ run.started_at }}</td>
+          <td>{{ run.completed_at or "–" }}</td>
+          <td>
+            {% if item.events %}
+            <details><summary>{{ item.events|length }} change{{ '' if item.events|length == 1 else 's' }}</summary><ul class="activity-events">{% for event in item.events %}<li><strong>{{ event.operation }} {{ event.destination }}</strong>: {{ event.track }}{% if event.artists %} · {{ event.artists }}{% endif %}<span class="field-note">{{ event.status }}</span></li>{% endfor %}</ul></details>
+            {% else %}–{% endif %}
+            {% if item.auto_matches %}
+            <details>
+              <summary>{{ item.auto_matches|length }} auto-matched — review suggested</summary>
+              <ul class="activity-events">
+                {% for match in item.auto_matches %}
+                <li>
+                  <strong>{{ match.requested.title }} → {{ match.selected.title }}</strong><br>
+                  {{ match.source_provider|replace('_', ' ')|title }} → {{ match.destination_provider|replace('_', ' ')|title }} · score {{ match.matching_score }}
+                  <span class="field-note">{{ match.reason }}</span>
+                  {% if match.alternatives %}<span class="field-note">Alternatives: {% for alternative in match.alternatives %}{{ alternative.track.title }}{% if alternative.track.artists %} · {{ alternative.track.artists|join(', ') }}{% endif %} (score {{ alternative.matching_score }}){% if not loop.last %}; {% endif %}{% endfor %}</span>{% endif %}
+                </li>
+                {% endfor %}
+              </ul>
+            </details>
+            {% endif %}
+            {% if item.unmatched_tracks %}
+            <details><summary>{{ item.unmatched_tracks|length }} unmatched and skipped</summary><ul class="activity-events">{% for track in item.unmatched_tracks %}<li><strong>{{ track.title }}</strong>{% if track.artists %} · {{ track.artists|join(', ') }}{% endif %}<span class="field-note">{{ track.reason }}</span></li>{% endfor %}</ul></details>
+            {% endif %}
+          </td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+  <p class="field-help">OPS records the exact reviewed plan and each provider write. Auto-matched recordings can be changed later from Matches. One-click undo/redo is intentionally not shown yet: it must first re-check the current playlist so it cannot undo a later manual change or remove the wrong duplicate occurrence.</p>
+  {% else %}
+  <div class="empty-state"><span class="empty-icon">✦</span><h3>No activity yet</h3><p>Create a pair, then review its first sync.</p></div>
+  {% endif %}
 </section>
 {% endblock %}

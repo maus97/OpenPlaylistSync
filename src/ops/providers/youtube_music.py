@@ -29,7 +29,12 @@ from ops.providers.base import (
     TrackUnavailable,
 )
 from ops.providers.errors import NetworkFailure, http_failure
-from ops.providers.types import ProviderPlaylist, ProviderTrack
+from ops.providers.types import (
+    AutomaticCandidateMatch,
+    ProviderPlaylist,
+    ProviderTrack,
+    ScoredCandidate,
+)
 
 YT_MUSIC_AUTH_SCHEME = "ytmusicapi_oauth"
 YT_MUSIC_SEARCH_LIMIT = 12
@@ -1183,6 +1188,35 @@ class YTMusicApiProvider:
         """Re-score an existing result set after source metadata was enriched."""
 
         return cls._choose_search_candidate(track, candidates)
+
+    @classmethod
+    def best_available_match(
+        cls, track: ProviderTrack, candidates: Sequence[ProviderTrack]
+    ) -> AutomaticCandidateMatch | None:
+        """Choose the strongest plausible result when strict ranking is ambiguous."""
+
+        ranked = tuple(
+            ScoredCandidate(candidate, score)
+            for score, candidate in cls._ranked_candidates(track, candidates)
+            # A zero score means title or artist identity failed. Variant and
+            # duration penalties may lower a still-plausible recording, but
+            # must not turn unrelated metadata into an automatic match.
+            if score >= 25.0
+        )
+        if not ranked:
+            return None
+        return AutomaticCandidateMatch(
+            selected=ranked[0].track,
+            score=ranked[0].score,
+            alternatives=ranked[1:5],
+            reason=(
+                "top candidates had similar YouTube Music matching scores"
+                if len(ranked) > 1 and ranked[0].score - ranked[1].score < 7.0
+                else (
+                    "the best viable YouTube Music result was below the strict confidence threshold"
+                )
+            ),
+        )
 
     def enrich_track_metadata(self, track: ProviderTrack) -> ProviderTrack:
         """Fetch release metadata only when a normal cross-provider match is ambiguous.

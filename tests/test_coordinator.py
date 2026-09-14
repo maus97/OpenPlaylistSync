@@ -720,7 +720,7 @@ def test_review_enriches_only_an_ambiguous_track_and_rescores_existing_candidate
     engine.dispose()
 
 
-def test_manual_candidate_mapping_conflict_fails_before_a_playlist_write() -> None:
+def test_automatic_candidate_mapping_conflict_fails_before_a_playlist_write() -> None:
     class ManualCandidateProvider(InMemoryProvider):
         def search_track(self, track: ProviderTrack) -> ProviderTrack | None:
             self.search_calls += 1
@@ -766,11 +766,8 @@ def test_manual_candidate_mapping_conflict_fails_before_a_playlist_write() -> No
             lambda account, _: providers[account.id],
         )
 
-        review = coordinator.prepare_review(pair)
-        selected = coordinator.select_candidate(pair, review.review_id, 0, "youtube_music:shared")
-
         with pytest.raises(TrackMappingConflict, match="different song"):
-            coordinator.apply(pair, selected.plan, _approval(review))
+            coordinator.prepare_review(pair)
         assert providers[target.id].tracks == []
     engine.dispose()
 

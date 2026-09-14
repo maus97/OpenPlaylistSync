@@ -71,8 +71,8 @@ def run_automatic_pair(coordinator: SyncCoordinator, pair: SyncPair) -> str:
     review = coordinator.prepare_review(pair)
     if review.baseline_upgrade_required or review.plan.initial_sync:
         return "manual baseline review required"
-    if review.plan.conflicts or review.unresolved_actions:
-        return "manual matching or conflict review required"
+    if review.plan.conflicts:
+        return "manual conflict review required"
     if not review.plan.actions:
         return "up to date"
     before = decode_baseline(baseline.snapshot_json)
@@ -91,5 +91,14 @@ def run_automatic_pair(coordinator: SyncCoordinator, pair: SyncPair) -> str:
             review_id=review.review_id,
             token=review.approval_token,
         ),
+        # A missing catalogue result is a track-level outcome. It must not
+        # prevent unrelated verified additions/removals from being applied.
+        skip_unresolved=True,
     )
+    if review.unresolved_actions:
+        count = len(review.unresolved_actions)
+        return f"applied with {count} unmatched track{'s' if count != 1 else ''} skipped"
+    if review.auto_matches:
+        count = len(review.auto_matches)
+        return f"applied; {count} best-available match{'es' if count != 1 else ''} recorded"
     return "applied"

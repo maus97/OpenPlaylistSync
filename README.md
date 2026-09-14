@@ -117,7 +117,9 @@ Before using valuable real playlists:
 
 - Complete the browser-based provider setup below and test with disposable
   playlists first.
-- Review ambiguous songs rather than relying on an automatic match.
+- Check auto-matched recordings in Activity or Matches when useful. OPS uses the
+  highest-ranked viable result and lets you replace an incorrect version later;
+  tracks with no viable result are skipped individually.
 - Keep remote deployments behind authenticated HTTPS access; OPS is designed
   for local or trusted-network use by default.
 

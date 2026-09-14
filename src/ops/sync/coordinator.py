@@ -33,7 +33,7 @@ from ops.providers.health import (
     ObservedProvider,
     record_failure,
 )
-from ops.providers.types import ProviderTrack
+from ops.providers.types import AutomaticCandidateMatch, ProviderTrack
 from ops.security.crypto import CredentialCipher
 from ops.storage.repositories import (
     SyncActionRepository,
@@ -55,6 +55,7 @@ from ops.sync.domain import (
 )
 from ops.sync.executor import PlanExecutionError, SyncExecutor, SyncProvider
 from ops.sync.leases import PairOperationBusy, acquire_pair_lease
+from ops.sync.matching import best_available_match as provider_neutral_best_match
 from ops.sync.safety import Approval, DestructiveActionApprovalError, plan_fingerprint
 from ops.sync.serialization import (
     decode_baseline,
@@ -74,7 +75,7 @@ MAX_MANUAL_CANDIDATES = 5
 # Versioned because this cache stores matching decisions.  Bump whenever the
 # matching semantics change so old false negatives do not suppress a repaired
 # review for twelve hours.
-SEARCH_CACHE_ALGORITHM_VERSION = 6
+SEARCH_CACHE_ALGORITHM_VERSION = 7
 RESOLVED_SEARCH_CACHE_TTL = timedelta(days=14)
 UNRESOLVED_SEARCH_CACHE_TTL = timedelta(hours=12)
 
@@ -108,6 +109,7 @@ class PreparedReview:
     status: str
     approval_expires_at: datetime | None
     candidate_options: tuple["ManualCandidateOptions", ...] = ()
+    auto_matches: tuple[dict[str, object], ...] = ()
     source_track_count: int | None = None
     target_track_count: int | None = None
     source_name: str | None = None
@@ -221,6 +223,49 @@ def _decode_candidates(value: str | None) -> dict[int, tuple[ProviderTrack, ...]
         return {}
 
 
+def _auto_match_dict(
+    action_index: int,
+    source_provider: str,
+    destination_provider: str,
+    requested: ProviderTrack,
+    match: AutomaticCandidateMatch,
+) -> dict[str, object]:
+    """Create bounded, user-safe evidence for a retrospective match review."""
+
+    return {
+        "action_index": action_index,
+        "source_provider": source_provider,
+        "destination_provider": destination_provider,
+        "requested": _provider_track_dict(requested),
+        "selected": _provider_track_dict(match.selected),
+        "matching_score": round(match.score, 2),
+        "reason": match.reason,
+        "alternatives": [
+            {
+                "track": _provider_track_dict(candidate.track),
+                "matching_score": round(candidate.score, 2),
+            }
+            for candidate in match.alternatives
+        ],
+    }
+
+
+def _unmatched_track_dict(
+    action_index: int,
+    action: ReconciliationAction,
+    source_provider: str,
+    destination_provider: str,
+) -> dict[str, object]:
+    return {
+        "action_index": action_index,
+        "title": action.track.title,
+        "artists": list(action.track.artists),
+        "source_provider": source_provider,
+        "destination_provider": destination_provider,
+        "reason": "no viable destination candidate passed the provider identity checks",
+    }
+
+
 def _action_provider_track(action: ReconciliationAction) -> ProviderTrack:
     """Restore full resolver evidence from one persisted plan action."""
 
@@ -311,6 +356,19 @@ class SyncCoordinator:
         if not callable(resolver) or not candidates:
             return None
         return resolver(track, candidates, self.settings.explicit_preference)
+
+    @staticmethod
+    def _best_available_match(
+        provider: SyncProvider,
+        track: ProviderTrack,
+        candidates: Sequence[ProviderTrack],
+    ) -> AutomaticCandidateMatch | None:
+        if not candidates:
+            return None
+        resolver = getattr(provider, "best_available_match", None)
+        if callable(resolver):
+            return resolver(track, candidates)
+        return provider_neutral_best_match(track, candidates)
 
     def _credentials(self, account: ProviderAccount) -> dict[str, Any]:
         return credentials_for(
@@ -1057,12 +1115,23 @@ class SyncCoordinator:
         target_provider: SyncProvider,
         source: PlaylistState | None = None,
         target: PlaylistState | None = None,
-    ) -> tuple[dict[int, ProviderTrack], tuple[int, ...], dict[int, tuple[ProviderTrack, ...]]]:
+    ) -> tuple[
+        dict[int, ProviderTrack],
+        tuple[int, ...],
+        dict[int, tuple[ProviderTrack, ...]],
+        tuple[dict[str, object], ...],
+    ]:
         resolutions = self._cached_resolutions(pair, plan)
         unresolved: list[int] = []
         candidates_by_index: dict[int, tuple[ProviderTrack, ...]] = {}
+        auto_matches: list[dict[str, object]] = []
         by_destination_and_fingerprint: dict[
-            tuple[Side, str], tuple[ProviderTrack | None, tuple[ProviderTrack, ...]]
+            tuple[Side, str],
+            tuple[
+                ProviderTrack | None,
+                tuple[ProviderTrack, ...],
+                AutomaticCandidateMatch | None,
+            ],
         ] = {}
         account_for_side = {
             Side.SOURCE: pair.source_account_id,
@@ -1099,8 +1168,9 @@ class SyncCoordinator:
                 continue
             lookup_key = (action.side, self._search_cache_fingerprint(provider_track))
             if lookup_key in by_destination_and_fingerprint:
-                resolved, candidates = by_destination_and_fingerprint[lookup_key]
+                resolved, candidates, auto_match = by_destination_and_fingerprint[lookup_key]
             else:
+                auto_match = None
                 cached = self._cached_search_result(
                     account_for_side[action.side], provider.name, provider_track
                 )
@@ -1110,6 +1180,33 @@ class SyncCoordinator:
                         resolved = self._resolve_explicit_preference(
                             provider, provider_track, candidates
                         )
+                        if resolved is None:
+                            auto_match = self._best_available_match(
+                                provider, provider_track, candidates
+                            )
+                            resolved = auto_match.selected if auto_match else None
+                    elif candidates:
+                        # Version 7 caches can contain a previous best-available
+                        # decision. Rebuild its evidence without another API call.
+                        strict_resolver = getattr(provider, "resolve_search_candidates", None)
+                        strict = (
+                            strict_resolver(provider_track, candidates)
+                            if callable(strict_resolver)
+                            else None
+                        )
+                        preferred = self._resolve_explicit_preference(
+                            provider, provider_track, candidates
+                        )
+                        if strict is None and preferred is None:
+                            candidate_match = self._best_available_match(
+                                provider, provider_track, candidates
+                            )
+                            if (
+                                candidate_match is not None
+                                and candidate_match.selected.provider_track_id
+                                == resolved.provider_track_id
+                            ):
+                                auto_match = candidate_match
                 else:
                     lookups += 1
                     if lookups > MAX_REVIEW_LOOKUPS:
@@ -1151,8 +1248,13 @@ class SyncCoordinator:
                                         )
                             except ProviderError:
                                 # Optional enrichment must never turn a usable
-                                # manual review into a failed review.
+                                # best-available fallback into a failed review.
                                 resolved = None
+                    if resolved is None:
+                        auto_match = self._best_available_match(
+                            provider, provider_track, candidates
+                        )
+                        resolved = auto_match.selected if auto_match else None
                     self._save_search_result(
                         account_for_side[action.side],
                         provider.name,
@@ -1160,14 +1262,29 @@ class SyncCoordinator:
                         resolved,
                         candidates,
                     )
-                by_destination_and_fingerprint[lookup_key] = (resolved, candidates)
+                by_destination_and_fingerprint[lookup_key] = (
+                    resolved,
+                    candidates,
+                    auto_match,
+                )
+            if candidates:
+                candidates_by_index[index] = candidates
+            if auto_match is not None:
+                origin_provider = target_provider if action.side is Side.SOURCE else source_provider
+                auto_matches.append(
+                    _auto_match_dict(
+                        index,
+                        origin_provider.name,
+                        provider.name,
+                        provider_track,
+                        auto_match,
+                    )
+                )
             if resolved is None:
                 unresolved.append(index)
-                if candidates:
-                    candidates_by_index[index] = candidates
             else:
                 resolutions[index] = resolved
-        return resolutions, tuple(unresolved), candidates_by_index
+        return resolutions, tuple(unresolved), candidates_by_index, tuple(auto_matches)
 
     def _prepared_from_run(
         self,
@@ -1187,12 +1304,19 @@ class SyncCoordinator:
             )
             source_track_count = summary.get("source_track_count")
             target_track_count = summary.get("target_track_count")
+            auto_matches = summary.get("auto_matches", ())
         except (TypeError, ValueError, json.JSONDecodeError):
             unresolved_indices = ()
             source_track_count = None
             target_track_count = None
+            auto_matches = ()
         source_track_count = source_track_count if isinstance(source_track_count, int) else None
         target_track_count = target_track_count if isinstance(target_track_count, int) else None
+        auto_matches = (
+            tuple(item for item in auto_matches if isinstance(item, dict))
+            if isinstance(auto_matches, (list, tuple))
+            else ()
+        )
         unresolved_actions = tuple(
             plan.actions[index] for index in unresolved_indices if 0 <= index < len(plan.actions)
         )
@@ -1209,6 +1333,7 @@ class SyncCoordinator:
             status=run.status,
             approval_expires_at=run.approval_expires_at,
             candidate_options=candidate_options,
+            auto_matches=auto_matches,
             source_track_count=source_track_count,
             target_track_count=target_track_count,
             source_name=summary.get("source_name"),
@@ -1284,13 +1409,19 @@ class SyncCoordinator:
             resolutions: dict[int, ProviderTrack] = {}
             unresolved_indices: tuple[int, ...] = ()
             candidate_options: dict[int, tuple[ProviderTrack, ...]] = {}
+            auto_matches: tuple[dict[str, object], ...] = ()
             if not baseline_upgrade and not plan.conflicts:
                 # A first merge can contain reciprocal additions when provider
                 # display metadata gives an existing recording different text
                 # keys. Resolve and persist those verified equivalences, then
                 # rebuild the plan so neither playlist receives a duplicate.
                 for _pass in range(4):
-                    resolutions, unresolved_indices, candidate_options = self._resolve_additions(
+                    (
+                        resolutions,
+                        unresolved_indices,
+                        candidate_options,
+                        auto_matches,
+                    ) = self._resolve_additions(
                         pair, plan, source_provider, target_provider, source, target
                     )
                     equivalents = self._existing_destination_equivalences(
@@ -1335,6 +1466,25 @@ class SyncCoordinator:
                     "target_name": target.name,
                     "pair_binding": self._pair_binding(pair),
                     "unresolved_indices": unresolved_indices,
+                    "unmatched_tracks": [
+                        _unmatched_track_dict(
+                            index,
+                            plan.actions[index],
+                            (
+                                target_provider.name
+                                if plan.actions[index].side is Side.SOURCE
+                                else source_provider.name
+                            ),
+                            (
+                                source_provider.name
+                                if plan.actions[index].side is Side.SOURCE
+                                else target_provider.name
+                            ),
+                        )
+                        for index in unresolved_indices
+                        if 0 <= index < len(plan.actions)
+                    ],
+                    "auto_matches": auto_matches,
                     "baseline_upgrade": baseline_upgrade,
                 },
                 sort_keys=True,
@@ -1684,6 +1834,12 @@ class SyncCoordinator:
                     "Create a fresh review so OPS can link the existing copies."
                 )
             self._assert_resolved_mapping_compatibility(pair, plan, resolutions)
+            try:
+                review_metadata = json.loads(run.summary_json or "{}")
+                if not isinstance(review_metadata, dict):
+                    review_metadata = {}
+            except (TypeError, ValueError, json.JSONDecodeError):
+                review_metadata = {}
             self._consume_review(run, approval)
 
             action_repo = SyncActionRepository(self.session)
@@ -1736,62 +1892,50 @@ class SyncCoordinator:
                     if index in result.provider_rejected_indices
                     else "track could not be resolved on the destination provider"
                 )
-            if result.skipped_indices:
-                SyncRunRepository(self.session).finish(
-                    run,
-                    "partially_applied",
-                    json.dumps(
-                        {
-                            "actions_applied": len(plan.actions) - len(result.skipped_indices),
-                            "actions_skipped": len(result.skipped_indices),
-                            "baseline_advanced": False,
-                        }
-                    ),
+            # Re-read and baseline every controlled result, including a track
+            # that had no viable destination candidate. The skipped occurrence
+            # is then an explicit accepted difference rather than an uncertain
+            # write, so it cannot block or repeat on every scheduler cycle.
+            self.session.flush()
+            resulting_source, resulting_target, _, _ = self._current_state(pair)
+            if replacement:
+                destination = (
+                    resulting_source if plan.actions[0].side is Side.SOURCE else resulting_target
                 )
-            else:
-                # Flush the mappings before re-reading.  If a provider is
-                # briefly eventually consistent, retain only the accepted
-                # addition(s) that the listing has not shown yet.
-                self.session.flush()
-                resulting_source, resulting_target, _, _ = self._current_state(pair)
-                if replacement:
-                    destination = (
-                        resulting_source
-                        if plan.actions[0].side is Side.SOURCE
-                        else resulting_target
+                ids = [t.source_provider_track_id for t in destination.tracks]
+                if (
+                    resolutions[0].provider_track_id not in ids
+                    or plan.actions[1].track.source_provider_track_id in ids
+                ):
+                    raise PlanExecutionError(
+                        "The replacement was sent but is not yet visible. "
+                        "Review current playlists before continuing."
                     )
-                    ids = [t.source_provider_track_id for t in destination.tracks]
-                    if (
-                        resolutions[0].provider_track_id not in ids
-                        or plan.actions[1].track.source_provider_track_id in ids
-                    ):
-                        raise PlanExecutionError(
-                            "The replacement was sent but is not yet visible. "
-                            "Review current playlists before continuing."
-                        )
-                    # A replacement has a net count of zero. Do not synthesize
-                    # an additional occurrence from the pre-removal snapshot.
-                    current_source = resulting_source
-                    current_target = resulting_target
-                    acknowledged_additions = []
-                resulting_source = self._with_acknowledged_additions(
-                    resulting_source, current_source, acknowledged_additions, Side.SOURCE
-                )
-                resulting_target = self._with_acknowledged_additions(
-                    resulting_target, current_target, acknowledged_additions, Side.TARGET
-                )
-                self._save_baseline(pair, resulting_source, resulting_target)
-                SyncRunRepository(self.session).finish(
-                    run,
-                    "applied",
-                    json.dumps(
-                        {
-                            "actions_applied": len(plan.actions),
-                            "actions_skipped": 0,
-                            "baseline_advanced": True,
-                        }
-                    ),
-                )
+                # A replacement has a net count of zero. Do not synthesize an
+                # extra occurrence from the pre-removal snapshot.
+                current_source = resulting_source
+                current_target = resulting_target
+                acknowledged_additions = []
+            resulting_source = self._with_acknowledged_additions(
+                resulting_source, current_source, acknowledged_additions, Side.SOURCE
+            )
+            resulting_target = self._with_acknowledged_additions(
+                resulting_target, current_target, acknowledged_additions, Side.TARGET
+            )
+            self._save_baseline(pair, resulting_source, resulting_target)
+            result_summary = {
+                "actions_applied": len(plan.actions) - len(result.skipped_indices),
+                "actions_skipped": len(result.skipped_indices),
+                "baseline_advanced": True,
+            }
+            for field in ("auto_matches", "unmatched_tracks"):
+                if review_metadata.get(field):
+                    result_summary[field] = review_metadata[field]
+            SyncRunRepository(self.session).finish(
+                run,
+                "applied_with_skips" if result.skipped_indices else "applied",
+                json.dumps(result_summary, sort_keys=True),
+            )
             self.session.commit()
         except Exception as exc:
             self.session.rollback()

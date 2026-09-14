@@ -871,9 +871,22 @@ def recent_runs(
         import json
 
         try:
-            error = json.loads(run.summary_json or "{}")
+            run_summary = json.loads(run.summary_json or "{}")
         except (ValueError, TypeError):
-            error = {}
+            run_summary = {}
+        if not isinstance(run_summary, dict):
+            run_summary = {}
+        auto_matches = (
+            [item for item in run_summary.get("auto_matches", ()) if isinstance(item, dict)]
+            if isinstance(run_summary.get("auto_matches", ()), (list, tuple))
+            else []
+        )
+        unmatched_tracks = (
+            [item for item in run_summary.get("unmatched_tracks", ()) if isinstance(item, dict)]
+            if isinstance(run_summary.get("unmatched_tracks", ()), (list, tuple))
+            else []
+        )
+        error = dict(run_summary)
         if not error.get("error"):
             error = {}
         incident = (
@@ -892,7 +905,15 @@ def recent_runs(
                 else "Historical"
             )
         )
-        activity.append({"run": run, "events": events, "error": error})
+        activity.append(
+            {
+                "run": run,
+                "events": events,
+                "error": error,
+                "auto_matches": auto_matches,
+                "unmatched_tracks": unmatched_tracks,
+            }
+        )
         if len(activity) == 25:
             break
     return templates.TemplateResponse(

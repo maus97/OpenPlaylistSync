@@ -267,6 +267,33 @@ def test_automatic_success_and_later_noop_update_durable_diagnostics(pair_contex
     assert spotify.writes == 1
 
 
+def test_best_available_match_outcome_is_successful_and_does_not_hold_next_cycle(
+    pair_context, monkeypatch
+):
+    from ops.sync import scheduling
+    from ops.sync.automatic import automation_binding
+
+    s, pair, coordinator, _, _ = pair_context
+    coordinator.accept_current_state(pair)
+    coordinator.settings.automatic_sync_bindings = [automation_binding(pair)]
+    monkeypatch.setattr(
+        scheduling,
+        "run_automatic_pair",
+        lambda *_: "applied; 2 best-available matches recorded",
+    )
+
+    first = scheduling.evaluate_pair(coordinator, pair)
+    first_success = pair.automatic_succeeded_at
+    second = scheduling.evaluate_pair(coordinator, pair)
+
+    assert first == second == "applied; 2 best-available matches recorded"
+    assert first_success is not None
+    assert pair.automatic_succeeded_at is not None
+    assert pair.automatic_outcome.startswith("applied")
+    assert pair.automatic_next_at is not None
+    assert not pair.automatic_outcome.startswith("manual")
+
+
 def test_apply_preflight_network_error_remains_retryable_without_uncertain_write_hold(pair_context):
     from ops.providers.errors import NetworkFailure
     from ops.providers.types import ProviderTrack

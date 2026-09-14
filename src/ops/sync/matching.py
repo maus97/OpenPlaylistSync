@@ -1,10 +1,10 @@
-"""Conservative candidate scoring used when one provider needs a track lookup."""
+"""Provider-neutral fallback scoring used by simple or synthetic providers."""
 
 import re
 import unicodedata
 from collections.abc import Sequence
 
-from ops.providers.types import ProviderTrack
+from ops.providers.types import AutomaticCandidateMatch, ProviderTrack, ScoredCandidate
 
 
 def _normal(value: str) -> str:
@@ -36,11 +36,7 @@ def candidate_score(requested: ProviderTrack, candidate: ProviderTrack) -> float
 def choose_best_candidate(
     requested: ProviderTrack, candidates: Sequence[ProviderTrack]
 ) -> ProviderTrack | None:
-    """Return only a clearly better high-confidence candidate.
-
-    Returning ``None`` sends an uncertain real-provider addition back to review
-    instead of silently inserting the first search result.
-    """
+    """Return the highest-ranked viable result, even when another is close."""
 
     scored = sorted(
         ((candidate_score(requested, candidate), candidate) for candidate in candidates),
@@ -49,6 +45,29 @@ def choose_best_candidate(
     )
     if not scored or scored[0][0] < 75:
         return None
-    if len(scored) > 1 and scored[0][0] - scored[1][0] < 10:
-        return None
     return scored[0][1]
+
+
+def best_available_match(
+    requested: ProviderTrack, candidates: Sequence[ProviderTrack]
+) -> AutomaticCandidateMatch | None:
+    """Select a plausible fallback while rejecting weak metadata-only guesses."""
+
+    scored = sorted(
+        ((candidate_score(requested, candidate), candidate) for candidate in candidates),
+        key=lambda item: (item[0], item[1].provider_track_id),
+        reverse=True,
+    )
+    viable = tuple(ScoredCandidate(candidate, score) for score, candidate in scored if score >= 75)
+    if not viable:
+        return None
+    return AutomaticCandidateMatch(
+        selected=viable[0].track,
+        score=viable[0].score,
+        alternatives=viable[1:],
+        reason=(
+            "top candidates had similar provider matching scores"
+            if len(viable) > 1 and viable[0].score - viable[1].score < 10
+            else "strict matching did not select a result; the best viable candidate was used"
+        ),
+    )

@@ -84,7 +84,7 @@ def evaluate_pair(coordinator, pair):
         else:
             coordinator.preview(pair)
             outcome = "Scheduled review completed; automatic changes not authorized"
-        if outcome in {"applied", "up to date"}:
+        if outcome == "up to date" or outcome.startswith("applied"):
             pair.automatic_succeeded_at = datetime.now(UTC)
     pair.automatic_outcome = outcome
     session.commit()

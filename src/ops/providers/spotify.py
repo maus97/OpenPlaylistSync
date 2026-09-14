@@ -11,7 +11,12 @@ import httpx
 
 from ops.providers.base import AuthorizationRequired, ProviderUnavailable
 from ops.providers.errors import NetworkFailure, PermissionDenied, http_failure
-from ops.providers.types import ProviderPlaylist, ProviderTrack
+from ops.providers.types import (
+    AutomaticCandidateMatch,
+    ProviderPlaylist,
+    ProviderTrack,
+    ScoredCandidate,
+)
 
 _DISPLAY_METADATA = re.compile(
     r"\s*(?:\(|\[)?(?:official(?: music)? (?:video|audio)|official lyric video|"
@@ -519,6 +524,33 @@ class SpotifyProvider:
             cls._choose_search_candidate(requested, candidates, explicit_preference=preference)
             if requested
             else None
+        )
+
+    @classmethod
+    def best_available_match(
+        cls, track: ProviderTrack, candidates: Sequence[ProviderTrack]
+    ) -> AutomaticCandidateMatch | None:
+        """Choose the strongest plausible Spotify result after strict matching ties."""
+
+        requested = cls._search_metadata(track)
+        if requested is None:
+            return None
+        ranked = tuple(
+            ScoredCandidate(candidate, score)
+            for score, candidate in cls._ranked_candidates(requested, candidates)
+            if score >= 70.0
+        )
+        if not ranked:
+            return None
+        return AutomaticCandidateMatch(
+            selected=ranked[0].track,
+            score=ranked[0].score,
+            alternatives=ranked[1:5],
+            reason=(
+                "top candidates had similar Spotify matching scores"
+                if len(ranked) > 1 and ranked[0].score - ranked[1].score < 8.0
+                else "the best viable Spotify result was below the strict confidence threshold"
+            ),
         )
 
     def close_track_candidates(self, track: ProviderTrack) -> Sequence[ProviderTrack]:

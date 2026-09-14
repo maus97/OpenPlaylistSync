@@ -1,8 +1,9 @@
 # OPS connection and automatic-sync reliability
 
 Branch: `fix/provider-connection-health` (based on main `61b7e0a`).
-Assessment/deployment date: 13 September 2026. No real playlist writes were used
-for fault injection or test setup. Existing untracked audit checkpoints preserved.
+Assessment/deployment dates: 13–14 September 2026. No real playlist writes were
+used for fault injection or test setup. The existing authorized automatic batch
+was allowed to synchronize normally. Existing untracked audit checkpoints preserved.
 
 ## What stopped syncing this time
 
@@ -13,7 +14,8 @@ pair 1 enabled, two-way, automatic changes authorized, interval 10 minutes.
 - Run 562 failed at **11:25:36 UTC / 21:25:36 Sydney** with generic
   `AuthorizationRequired`. Old logic imposed a one-hour wait until 12:25:36 UTC.
   It could not be superseded by successful reconnection/verification.
-- Healthy scheduler cycles at 10:25/35/45/55 and 11:05/15 UTC still did not Apply:
+- Before the follow-up matching-policy change, healthy scheduler cycles at
+  10:25/35/45/55 and 11:05/15 UTC still did not Apply:
   each produced **36 additions, no deletions, two unmatched recordings**:
   “Girlfriend” (Avril Lavigne) and “You Found Me” (The Fray). The existing policy
   deliberately requires match review before applying that whole batch. The UI
@@ -36,7 +38,8 @@ during live verification of the fix; neither service needed a new OAuth approval
 | `providers/health.py`, models, migration 0013 | Persistent account verification and provider-scoped incidents separate from immutable run history. Successful authenticated operations resolve older auth incidents only for that account. Public catalogue search does not prove authentication. Legacy generic auth failures require both bound accounts verified afterwards. |
 | `providers/errors.py`, Spotify/YouTube adapters | Central categories: authentication, permissions, read-only/forbidden writes, rate limit/quota, network, temporary provider, missing resource, unavailable recording, internal error. Structured HTTP status/reason/Retry-After preferred; text fallback only where the SDK discards structure. Safe allowlisted diagnostics, no raw token responses. |
 | `auth/credentials.py`, OAuth services | Shared proactive refresh with five-minute margin; rejected HTTP401 retried once after refresh. Rotated refresh tokens preserved encrypted. Durable refresh lease and ciphertext compare-and-swap protect concurrent reconnects. HTTP20-second refresh timeout; invalid/revoked credentials distinguished from temporary failure. |
-| `sync/automatic.py`, `sync/scheduling.py` | Category-specific retry gates. Recovery removes obsolete auth waits immediately; next normal tick can run. Every evaluated pair records attempt/outcome/next evaluation. Match conflicts, bulk deletions, initial baseline and uncertain writes remain explicit safety holds, not connection failures. |
+| `sync/automatic.py`, `sync/scheduling.py` | Category-specific retry gates. Recovery removes obsolete auth waits immediately; next normal tick can run. Every evaluated pair records attempt/outcome/next evaluation. Viable ambiguity no longer holds an automatic batch; conflicts, bulk deletions, initial baseline and uncertain writes remain explicit safety holds, not connection failures. |
+| provider matching, coordinator, Activity/Matches | Strict matching remains the first choice. When it cannot separate viable results, provider ranking selects the highest-scoring candidate and records the request, selected ID, score, alternatives, reason and provider direction. Invalid title/artist identities are rejected. A track with no viable result is skipped individually and baselined as an explicit accepted difference, so unrelated work continues and the item does not repeat forever. Activity exposes the evidence and Matches retains manual replacement. |
 | `main.py` | Scheduler enumeration protected separately; each pair has an independent DB session and exception boundary. Failed transactions cannot poison subsequent pairs. Safe skip/failure logs include provider/category/operation and retry context. |
 | `scheduler.py` | Recurring job survives exceptions; monotonic heartbeat, completed-cycle count, true next tick, missing/paused timer watchdog. Check-now advances the existing job instead of queueing new jobs; max_instances/coalescing/in-process exclusion remain. |
 | `sync/leases.py`, executor/coordinator | Separate durable automatic-job lease spans the scheduled workflow; existing operation lease still guards manual review/Apply. Expired owners cannot renew or start another write; old releases cannot unlock a new owner. Interrupted read-only work retries; potentially unacknowledged writes require review. |
@@ -66,7 +69,8 @@ Normal handled provider/DB exceptions leave future ticks scheduled.
 
 ## Tests and security checks
 
-- Full Linux/Python3.12 suite: **228 passed**.
+- Full Linux/Python3.12 suite: **237 passed** (including the new matching,
+  controlled-skip, retrospective correction and scheduler-continuation cases).
 - 51 targeted connection/scheduler cases pass. Includes correct-provider resolution,
   wrong-provider non-resolution, legacy records,401refresh and final rejection,
   403/429/5xx/network distinctions, rotated refresh tokens, refresh/reconnect race,
@@ -119,6 +123,39 @@ the completed scheduler runs. Run 562 remains stored as historical
 eligibility. The inspected scheduler logs contain the explicit hold and next-check
 reason, no uncaught exception, and no token/credential markers.
 
+## Follow-up: non-blocking candidate selection
+
+The production policy now distinguishes ambiguity from invalidity. A plausible
+highest-ranked result is selected even when another candidate has a close score;
+the choice is auditable and correctable later. A zero/failed title or artist
+identity remains ineligible. If no candidate is viable, only that track is skipped
+and recorded while the rest of the batch proceeds. The search-cache algorithm was
+advanced to version 7 so prior unresolved decisions are reconsidered without
+changing the database schema.
+
+The first live cycle using this policy started at **09:34:13 UTC on 14 September
+2026** and completed at **09:35:31 UTC**. It applied all **43** authorized actions,
+skipped zero and advanced the baseline. It chose:
+
+- `Girlfriend` by Avril Lavigne → YouTube Music `g0TiuFwX0r8`, score 103;
+- `You Found Me` by The Fray → YouTube Music `_tdWkuyFI6c`, score 108.
+
+Both choices retained the next-best alternatives and reason in Activity history.
+The operation and automatic leases were released, no provider incident or active
+run remained, and the scheduler recorded the outcome `applied; 2 best-available
+matches recorded`. A current SQLite backup was created inside the private data
+volume before deployment as `/data/pre-best-available-match-20260914.db`.
+
+After the final UI image was installed, its own natural scheduler cycle started at
+**09:46:47 UTC** and completed at **09:46:52 UTC** with `up to date`. It re-read
+both 99-track playlists, did not reopen matching review and made no duplicate
+provider write. The next check is **09:56:47 UTC**. The final container is healthy,
+has zero restarts, no stale lock, no active incident and no unfinished run. Its
+sanitized startup/scheduler log contains no token, credential or exception output.
+The authenticated live browser remained locked during final UI inspection; the
+Activity evidence and Matches correction path were instead verified by the passing
+rendering and end-to-end tests without entering or requesting the operator password.
+
 ## External configuration / genuinely manual actions
 
 **Confirmed in Google Cloud:** Open Playlist Sync is External / Testing. Publish app
@@ -129,12 +166,12 @@ repair. Complete the required Google Auth Platform Branding information, then re
 Audience / Publish app and any verification requirements. Reconnect YouTube after
 that configuration change to obtain a newly issued token. No Cloud settings changed.
 
-The two ambiguous recordings still require an explicit match choice/review. I did
-not approve a different recording or change partial-apply baseline policy silently.
-Automatic reviews continue; this safety hold is now visible. Wrong/ambiguous matches,
-revoked grants, missing scopes, read-only targets and uncertain prior external writes
-remain legitimate reasons for human action. A host that sleeps or stops Docker also
-cannot run a ten-minute background job during that downtime.
+Ambiguous but viable recordings no longer require an explicit match before an
+automatic batch can proceed. Review is retrospective and the saved choice remains
+replaceable from Matches. Revoked grants, missing scopes, read-only targets,
+conflicts, bulk-removal safeguards and uncertain prior external writes remain
+legitimate reasons for human action. A host that sleeps or stops Docker also cannot
+run a ten-minute background job during that downtime.
 
 ## Rollback
 

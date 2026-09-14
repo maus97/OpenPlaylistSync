@@ -444,14 +444,107 @@ def test_automatic_revalidates_live_state(pair_context, monkeypatch):
     assert spotify.writes == youtube.writes == 0
 
 
-def test_automatic_unresolved_does_not_write(pair_context, monkeypatch):
+def test_automatic_skips_only_unmatched_track_and_advances_baseline(pair_context, monkeypatch):
     _, pair, coordinator, spotify, youtube = pair_context
+    spotify.tracks.append(ProviderTrack("spotify:keep", "Keep", ("Artist",)))
+    youtube.tracks.append(ProviderTrack("youtube_music:keep", "Keep", ("Artist",)))
     coordinator.accept_current_state(pair)
     coordinator.settings.automatic_sync_bindings = [automation_binding(pair)]
-    spotify.tracks.append(ProviderTrack("spotify:new", "New", ("Artist",)))
-    monkeypatch.setattr(youtube, "search_track", lambda _: None)
-    assert run_automatic_pair(coordinator, pair) == "manual matching or conflict review required"
-    assert spotify.writes == youtube.writes == 0
+    spotify.tracks.extend(
+        (
+            ProviderTrack("spotify:missing", "Missing", ("Artist",)),
+            ProviderTrack("spotify:available", "Available", ("Artist",)),
+        )
+    )
+    original_search = youtube.search_track
+    monkeypatch.setattr(
+        youtube,
+        "search_track",
+        lambda track: None if track.title == "Missing" else original_search(track),
+    )
+
+    assert run_automatic_pair(coordinator, pair) == "applied with 1 unmatched track skipped"
+    completed = coordinator.session.scalar(select(SyncRun).order_by(SyncRun.id.desc()).limit(1))
+    assert completed is not None
+    assert completed.status == "applied_with_skips"
+    assert '"baseline_advanced": true' in (completed.summary_json or "")
+    assert '"title": "Missing"' in (completed.summary_json or "")
+    assert [track.title for track in youtube.tracks] == ["Keep", "Available"]
+    assert youtube.writes == 1
+    assert run_automatic_pair(coordinator, pair) == "up to date"
+
+
+def test_automatic_uses_ambiguous_best_matches_and_keeps_manual_correction(pair_context):
+    _, pair, coordinator, spotify, youtube = pair_context
+
+    class AmbiguousDestination(PlaylistProvider):
+        resolve_search_candidates = staticmethod(SpotifyProvider.resolve_search_candidates)
+        best_available_match = staticmethod(SpotifyProvider.best_available_match)
+
+        @staticmethod
+        def _slug(track):
+            return track.title.casefold().replace(" ", "-")
+
+        def search_track(self, track):
+            self.searches += 1
+            return None
+
+        def close_track_candidates(self, track):
+            slug = self._slug(track)
+            return (
+                ProviderTrack(
+                    f"youtube_music:z-{slug}",
+                    track.title,
+                    track.artists,
+                    duration_ms=(track.duration_ms or 180_000) + 1_000,
+                ),
+                ProviderTrack(
+                    f"youtube_music:y-{slug}",
+                    track.title,
+                    track.artists,
+                    duration_ms=(track.duration_ms or 180_000) + 2_000,
+                ),
+            )
+
+    youtube = AmbiguousDestination("youtube_music", [])
+    coordinator.provider_factory = lambda account, _: (
+        spotify if account.id == pair.source_account_id else youtube
+    )
+    coordinator.accept_current_state(pair)
+    coordinator.settings.automatic_sync_bindings = [automation_binding(pair)]
+    spotify.tracks.extend(
+        (
+            ProviderTrack("spotify:one", "First Song", ("Artist",), duration_ms=180_000),
+            ProviderTrack("spotify:two", "Second Song", ("Artist",), duration_ms=200_000),
+        )
+    )
+
+    assert run_automatic_pair(coordinator, pair) == "applied; 2 best-available matches recorded"
+    assert [track.provider_track_id for track in youtube.tracks] == [
+        "youtube_music:z-first-song",
+        "youtube_music:z-second-song",
+    ]
+    completed = coordinator.session.scalar(
+        select(SyncRun).where(SyncRun.status == "applied").order_by(SyncRun.id.desc()).limit(1)
+    )
+    assert completed is not None
+    assert (completed.summary_json or "").count('"matching_score"') >= 2
+    assert '"auto_matches"' in (completed.summary_json or "")
+    assert run_automatic_pair(coordinator, pair) == "up to date"
+
+    replacement = coordinator.prepare_replacement(pair, Side.TARGET, "youtube_music:z-first-song")
+    selected = coordinator.select_candidate(
+        pair,
+        replacement.review_id,
+        0,
+        "youtube_music:y-first-song",
+    )
+    apply_review(coordinator, pair, replace(selected, approval_token=replacement.approval_token))
+    assert [track.provider_track_id for track in youtube.tracks] == [
+        "youtube_music:z-second-song",
+        "youtube_music:y-first-song",
+    ]
+    assert coordinator.prepare_review(pair).plan.actions == ()
 
 
 def test_scheduled_tick_applies_only_after_enabled(pair_context, monkeypatch):
