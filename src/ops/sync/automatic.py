@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from sqlalchemy import select
 
 from ops.models import SyncPair, SyncRun
+from ops.providers.health import retry_pending
 from ops.storage.repositories import SyncBaselineRepository
 from ops.sync.coordinator import SyncCoordinator
 from ops.sync.domain import Side
@@ -51,8 +52,8 @@ def run_automatic_pair(coordinator: SyncCoordinator, pair: SyncPair) -> str:
         .order_by(SyncRun.started_at.desc(), SyncRun.id.desc())
         .limit(1)
     )
-    if authorization_retry_pending(latest):
-        return "authorization needs attention"
+    if retry_pending(coordinator.session, pair, latest):
+        return "provider retry pending"
     baseline = SyncBaselineRepository(coordinator.session).latest_for_pair(pair.id)
     if baseline is None:
         return "manual first sync required"

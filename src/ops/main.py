@@ -3,6 +3,7 @@
 import logging
 import os
 from contextlib import asynccontextmanager
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import uvicorn
@@ -16,6 +17,8 @@ from ops.api.routes import router
 from ops.config import Settings, get_settings
 from ops.configuration import load_app_settings
 from ops.db import SessionLocal
+from ops.models import SyncPair
+from ops.providers.errors import diagnostic
 from ops.providers.factory import create_provider
 from ops.scheduler import SchedulerService
 from ops.security.logging import install_sensitive_query_filter
@@ -25,13 +28,10 @@ from ops.security.middleware import (
     RuntimeSecurityMode,
     SecurityHeadersMiddleware,
 )
-from ops.storage.repositories import SyncPairRepository, SyncRunRepository
-from ops.sync.automatic import (
-    authorization_retry_pending,
-    automation_binding,
-    run_automatic_pair,
-)
+from ops.storage.repositories import SyncPairRepository
 from ops.sync.coordinator import SyncCoordinator
+from ops.sync.leases import PairOperationBusy, acquire_pair_lease
+from ops.sync.scheduling import evaluate_pair
 
 
 def _lifespan(base_settings: Settings, *, load_gui_settings: bool):
@@ -41,6 +41,15 @@ def _lifespan(base_settings: Settings, *, load_gui_settings: bool):
         if load_gui_settings:
             with SessionLocal() as session:
                 active_settings = load_app_settings(session, base_settings)
+        ops_logger = logging.getLogger("ops")
+        if not ops_logger.handlers:
+            handler = logging.StreamHandler()
+            handler.setFormatter(
+                logging.Formatter("%(asctime)s %(levelname)s %(name)s: %(message)s")
+            )
+            ops_logger.addHandler(handler)
+        ops_logger.setLevel(getattr(logging, active_settings.log_level.upper(), logging.INFO))
+        ops_logger.propagate = False
         app.state.security_mode.https_enabled = active_settings.https_mode_enabled
         scheduler = SchedulerService(active_settings, sync_job=run_scheduled_sync)
         scheduler.start()
@@ -53,33 +62,72 @@ def _lifespan(base_settings: Settings, *, load_gui_settings: bool):
     return lifespan
 
 
-def run_scheduled_sync() -> None:
+def run_scheduled_sync() -> bool:
     """Preview by default; apply only for explicitly opted-in playlist pairs."""
 
-    with SessionLocal() as session:
-        settings = load_app_settings(session)
-        if not settings.scheduler_enabled or not settings.credential_encryption_key:
-            return
-        coordinator = SyncCoordinator(session, settings, create_provider)
-        for pair in SyncPairRepository(session).get_enabled():
-            latest = SyncRunRepository(session).latest_for_pair(pair.id)
-            if authorization_retry_pending(latest):
-                logging.getLogger(__name__).info(
-                    "Scheduled pair %s is waiting for its authorization retry", pair.id
-                )
-                continue
-            try:
-                if automation_binding(pair) in settings.automatic_sync_bindings:
-                    outcome = run_automatic_pair(coordinator, pair)
-                    logging.getLogger(__name__).info("Scheduled pair %s: %s", pair.id, outcome)
-                else:
-                    coordinator.preview(pair)
-            except Exception as exc:
-                session.rollback()
-                # Provider exception messages can contain sensitive response data.
-                logging.getLogger(__name__).warning(
-                    "Scheduled pair %s needs attention (%s)", pair.id, type(exc).__name__
-                )
+    logger = logging.getLogger(__name__)
+    try:
+        with SessionLocal() as session:
+            settings = load_app_settings(session)
+            if not settings.scheduler_enabled or not settings.credential_encryption_key:
+                logger.info("Scheduler paused: disabled or credential storage unavailable")
+                return True
+            pair_ids = [p.id for p in SyncPairRepository(session).get_enabled()]
+    except Exception as exc:
+        logger.error("Scheduler enumeration failed; next tick will retry: %s", diagnostic(exc))
+        return False
+    for pair_id in pair_ids:
+        lease = None
+        try:
+            with SessionLocal() as session:
+                pair = session.get(SyncPair, pair_id)
+                if pair is None or not pair.enabled:
+                    continue
+                lease = acquire_pair_lease(session, pair.id, kind="automatic")
+                coordinator = SyncCoordinator(session, settings, create_provider)
+                try:
+                    outcome = evaluate_pair(coordinator, pair)
+                    logger.info(
+                        "Scheduled pair %s: %s; next evaluation %s UTC",
+                        pair_id,
+                        outcome,
+                        pair.automatic_next_at,
+                    )
+                except Exception as exc:
+                    session.rollback()
+                    info = diagnostic(exc)
+                    pair = session.get(SyncPair, pair_id, populate_existing=True)
+                    pair.automatic_outcome = (
+                        "Another operation is running; retry next tick"
+                        if isinstance(exc, PairOperationBusy)
+                        else info["error"]
+                    )
+                    pair.automatic_next_at = datetime.now(UTC) + timedelta(
+                        minutes=settings.sync_interval_minutes
+                    )
+                    session.commit()
+                    logger.warning(
+                        "Scheduled pair %s failed; next tick will retry: %s", pair_id, info
+                    )
+        except PairOperationBusy:
+            logger.info("Scheduled pair %s skipped: automatic job already running", pair_id)
+        except Exception as exc:
+            logger.error(
+                "Scheduled pair %s boundary failed; next tick will retry: %s",
+                pair_id,
+                diagnostic(exc),
+            )
+        finally:
+            if lease:
+                try:
+                    lease.release()
+                except Exception as exc:
+                    logger.error(
+                        "Scheduled pair %s lease release failed; lease expires: %s",
+                        pair_id,
+                        diagnostic(exc),
+                    )
+    return True
 
 
 def create_app(app_settings: Settings | None = None) -> FastAPI:

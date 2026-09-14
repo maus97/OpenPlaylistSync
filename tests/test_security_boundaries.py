@@ -100,7 +100,7 @@ def _complete_setup(client: TestClient, settings: Settings) -> str:
 
 
 def test_playlist_page_survives_expired_google_refresh(tmp_path, monkeypatch):
-    from ops.auth.youtube_music import YouTubeMusicOAuthError
+    from ops.providers.base import AuthorizationRequired
 
     client, factory, settings = _isolated_client(tmp_path, monkeypatch)
     with client:
@@ -117,17 +117,15 @@ def test_playlist_page_survives_expired_google_refresh(tmp_path, monkeypatch):
             session.commit()
 
         def expired(*args):
-            raise YouTubeMusicOAuthError(
-                "Google authorization expired; start the connection again."
-            )
+            raise AuthorizationRequired("Google authorization expired; start the connection again.")
 
         monkeypatch.setattr(routes, "provider_for_account", expired)
         monkeypatch.setattr(routes, "load_app_settings", lambda _: settings)
         response = client.get("/pairs")
         assert response.status_code == 200
-        assert "Google authorization expired" in response.text
+        assert "Authorization could not be renewed" in response.text
         assert "Connect YouTube Music" in response.text
-        assert "Connection needs attention" in response.text
+        assert "Service status" in response.text
 
 
 def test_automatic_settings_preserve_secrets_and_require_csrf(tmp_path, monkeypatch):

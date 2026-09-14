@@ -15,6 +15,10 @@ class ProviderAccount(Base):
     __table_args__ = (UniqueConstraint("provider_name", "external_account_id"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    auth_verified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    refresh_lock_token: Mapped[str | None] = mapped_column(String(128))
+    refresh_lock_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     provider_name: Mapped[str] = mapped_column(String(64), nullable=False)
     external_account_id: Mapped[str] = mapped_column(String(255), nullable=False)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
@@ -24,6 +28,21 @@ class ProviderAccount(Base):
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+
+class ProviderIncident(Base):
+    """Safe failure evidence; resolved incidents remain as history."""
+
+    __tablename__ = "provider_incidents"
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    account_id: Mapped[int] = mapped_column(ForeignKey("provider_accounts.id"), index=True)
+    pair_id: Mapped[int | None] = mapped_column(ForeignKey("sync_pairs.id"), index=True)
+    category: Mapped[str] = mapped_column(String(32))
+    operation: Mapped[str] = mapped_column(String(64))
+    resource: Mapped[str | None] = mapped_column(String(255))
+    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    retry_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    resolved_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class AppConfiguration(Base):
@@ -93,6 +112,13 @@ class SyncPair(Base):
     operation_lock_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    automatic_lock_token: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    automatic_lock_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_attempted_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_succeeded_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_next_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    automatic_outcome: Mapped[str | None] = mapped_column(String(512), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()

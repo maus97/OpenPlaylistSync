@@ -38,6 +38,10 @@ ENV PATH=/opt/venv/bin:$PATH \
 
 RUN apt-get update \
     && apt-get install --yes --no-install-recommends \
+        gzip=1.13-1+deb13u1 \
+        libpcre2-8-0=10.46-1~deb13u2 \
+        libsqlite3-0=3.46.1-7+deb13u2 \
+        perl-base=5.40.1-6+deb13u1 \
         libssl3t64=3.5.7-1~deb13u2 \
         openssl=3.5.7-1~deb13u2 \
     && rm -rf /var/lib/apt/lists/* \

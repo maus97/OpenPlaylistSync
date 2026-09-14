@@ -12,11 +12,10 @@ from typing import Any
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
-from ops.auth.spotify import SpotifyOAuthConfig, SpotifyOAuthService
+from ops.auth.credentials import credentials_for, enable_refresh
+from ops.auth.spotify import SpotifyOAuthService
 from ops.auth.youtube_music import (
-    YOUTUBE_MUSIC_AUTH_SCHEME,
     YouTubeMusicAuthService,
-    oauth_token_needs_refresh,
 )
 from ops.config import Settings
 from ops.models import (
@@ -29,10 +28,14 @@ from ops.models import (
     SyncRun,
 )
 from ops.providers.base import AuthorizationRequired, ProviderError
+from ops.providers.errors import diagnostic
+from ops.providers.health import (
+    ObservedProvider,
+    record_failure,
+)
 from ops.providers.types import ProviderTrack
 from ops.security.crypto import CredentialCipher
 from ops.storage.repositories import (
-    ProviderAccountRepository,
     SyncActionRepository,
     SyncBaselineRepository,
     SyncRunRepository,
@@ -309,88 +312,26 @@ class SyncCoordinator:
             return None
         return resolver(track, candidates, self.settings.explicit_preference)
 
-    def _refresh_spotify_credentials(
-        self, account: ProviderAccount, credentials: dict[str, Any]
-    ) -> dict[str, Any]:
-        expires_at = credentials.get("expires_at")
-        if not expires_at:
-            return credentials
-        try:
-            expiry = datetime.fromisoformat(str(expires_at)).astimezone(UTC)
-        except ValueError:
-            return credentials
-        if expiry > datetime.now(UTC):
-            return credentials
-        refresh_token = credentials.get("refresh_token")
-        if not refresh_token:
-            raise ValueError("Spotify authorization expired; reconnect the account")
-        if not self.settings.spotify_client_id or not self.settings.spotify_client_secret:
-            raise ValueError("Spotify OAuth settings are incomplete")
-        refreshed = SpotifyOAuthService(
-            SpotifyOAuthConfig(
-                self.settings.spotify_client_id,
-                self.settings.spotify_client_secret,
-                self.settings.spotify_redirect_uri,
-            )
-        ).refresh_token(str(refresh_token))
-        merged = {
-            **credentials,
-            **refreshed,
-            "refresh_token": refreshed.get("refresh_token", refresh_token),
-            "expires_at": (
-                datetime.now(UTC) + timedelta(seconds=int(refreshed.get("expires_in", 3600)))
-            ).isoformat(),
-        }
-        if self.cipher is None:
-            raise ValueError("credential encryption is not configured")
-        ProviderAccountRepository(self.session, self.cipher).save_credentials(account, merged)
-        self.session.commit()
-        return merged
-
-    def _refresh_youtube_music_credentials(
-        self, account: ProviderAccount, credentials: dict[str, Any]
-    ) -> dict[str, Any]:
-        if credentials.get("auth_scheme") != YOUTUBE_MUSIC_AUTH_SCHEME:
-            raise ValueError(
-                "YouTube Music needs to be reconnected for the current OAuth integration"
-            )
-        if not oauth_token_needs_refresh(credentials):
-            return credentials
-        refresh_token = credentials.get("refresh_token")
-        if not refresh_token:
-            raise ValueError("YouTube Music authorization expired; reconnect the account")
-        if not self.settings.ytmusic_client_id or not self.settings.ytmusic_client_secret:
-            raise ValueError("YouTube Music OAuth settings are incomplete")
-        refreshed = YouTubeMusicAuthService(
-            self.settings.ytmusic_client_id, self.settings.ytmusic_client_secret
-        ).refresh_token(str(refresh_token))
-        merged = {
-            **credentials,
-            **refreshed,
-            "refresh_token": refreshed.get("refresh_token", refresh_token),
-        }
-        if self.cipher is None:
-            raise ValueError("credential encryption is not configured")
-        ProviderAccountRepository(self.session, self.cipher).save_credentials(account, merged)
-        self.session.commit()
-        return merged
-
     def _credentials(self, account: ProviderAccount) -> dict[str, Any]:
-        if self.cipher is None:
-            raise ValueError("credential encryption is not configured")
-        credentials = ProviderAccountRepository(self.session, self.cipher).load_credentials(account)
-        if account.provider_name == "spotify":
-            credentials = self._refresh_spotify_credentials(account, credentials)
-        elif account.provider_name == "youtube_music":
-            credentials = self._refresh_youtube_music_credentials(account, credentials)
-            if not self.settings.ytmusic_client_id or not self.settings.ytmusic_client_secret:
-                raise ValueError("YouTube Music OAuth settings are incomplete")
-            credentials = {
-                **credentials,
-                "_ytmusic_client_id": self.settings.ytmusic_client_id,
-                "_ytmusic_client_secret": self.settings.ytmusic_client_secret,
-            }
-        return credentials
+        return credentials_for(
+            self.session,
+            self.settings,
+            account,
+            spotify_service=SpotifyOAuthService,
+            youtube_service=YouTubeMusicAuthService,
+        )
+
+    def _observed_provider(self, account):
+        provider = self.provider_factory(account, self._credentials(account))
+        enable_refresh(
+            provider,
+            self.session,
+            self.settings,
+            account,
+            spotify_service=SpotifyOAuthService,
+            youtube_service=YouTubeMusicAuthService,
+        )
+        return ObservedProvider(provider, self.session, account.id)
 
     def _providers(
         self, pair: SyncPair
@@ -399,8 +340,8 @@ class SyncCoordinator:
         target_account = self.session.get(ProviderAccount, pair.target_account_id)
         if source_account is None or target_account is None:
             raise ValueError("sync pair references a missing provider account")
-        source_provider = self.provider_factory(source_account, self._credentials(source_account))
-        target_provider = self.provider_factory(target_account, self._credentials(target_account))
+        source_provider = self._observed_provider(source_account)
+        target_provider = self._observed_provider(target_account)
         return source_provider, target_provider, source_account, target_account
 
     @staticmethod
@@ -1402,6 +1343,7 @@ class SyncCoordinator:
             self.session.add(run)
             self.session.flush()
             run_repo.prune_previews(pair.id)
+            lease.assert_owned(self.session)
             self.session.commit()
             return self._prepared_from_run(run, token)
         except Exception as exc:
@@ -1416,10 +1358,7 @@ class SyncCoordinator:
                         if isinstance(exc, AuthorizationRequired)
                         else "review_failed",
                         json.dumps(
-                            {
-                                "error": "review could not be prepared",
-                                "error_type": type(exc).__name__,
-                            },
+                            record_failure(self.session, exc, pair.id),
                             sort_keys=True,
                         ),
                     )
@@ -1784,6 +1723,7 @@ class SyncCoordinator:
                 fail_on_unavailable=replacement,
                 pre_resolved_tracks=resolutions,
                 on_action_completed=completed,
+                before_action=lease.renew,
                 on_track_resolved=save_resolved_addition,
                 on_track_unavailable=lambda action, track: self._invalidate_stale_resolution(
                     pair, action, track
@@ -1855,16 +1795,25 @@ class SyncCoordinator:
             self.session.commit()
         except Exception as exc:
             self.session.rollback()
+            if run is not None and run.status == "planned" and isinstance(exc, ProviderError):
+                # Failed preflight has not sent writes. Retain its diagnostic,
+                # but do not create a permanent uncertain-Apply safety hold.
+                SyncRunRepository(self.session).finish(
+                    run, "review_failed", json.dumps(record_failure(self.session, exc, pair.id))
+                )
+                self.session.commit()
             if run is not None and run.status == "applying":
                 run = self.session.get(SyncRun, run.id)
                 if run is not None:
                     actions = SyncActionRepository(self.session).for_run(run.id)
                     for action in actions:
                         if action.status == "planned":
-                            SyncActionRepository(self.session).fail(action, str(exc))
+                            SyncActionRepository(self.session).fail(
+                                action, diagnostic(exc)["error"]
+                            )
                             break
                     SyncRunRepository(self.session).finish(
-                        run, "failed", json.dumps({"error": str(exc)[:500]})
+                        run, "failed", json.dumps(record_failure(self.session, exc, pair.id))
                     )
                     self.session.commit()
             raise

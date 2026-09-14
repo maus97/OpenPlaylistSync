@@ -12,6 +12,7 @@ import re
 import time
 import unicodedata
 from collections.abc import Callable, Mapping, Sequence
+from datetime import UTC, datetime
 from hashlib import sha256
 from typing import Any, Protocol, TypeVar
 
@@ -27,6 +28,7 @@ from ops.providers.base import (
     RateLimited,
     TrackUnavailable,
 )
+from ops.providers.errors import NetworkFailure, http_failure
 from ops.providers.types import ProviderPlaylist, ProviderTrack
 
 YT_MUSIC_AUTH_SCHEME = "ytmusicapi_oauth"
@@ -137,6 +139,7 @@ class _YouTubeDataApiClient:
 
     def __init__(self, access_token: str, client: httpx.Client | None = None) -> None:
         self._access_token = access_token
+        self._token_refresher = None
         self._client = client or httpx.Client(base_url=self._BASE_URL, timeout=20)
 
     @staticmethod
@@ -145,13 +148,15 @@ class _YouTubeDataApiClient:
             payload = response.json()
         except (TypeError, ValueError):
             return None
-        errors = payload.get("error", {}).get("errors", []) if isinstance(payload, Mapping) else []
+        error = payload.get("error") if isinstance(payload, Mapping) else None
+        errors = error.get("errors", []) if isinstance(error, Mapping) else []
         if not isinstance(errors, list) or not errors:
             return None
         reason = errors[0].get("reason") if isinstance(errors[0], Mapping) else None
         return str(reason) if reason else None
 
     def _request(self, method: str, endpoint: str, **kwargs: Any) -> dict[str, Any]:
+        renewed = False
         headers = {"Authorization": f"Bearer {self._access_token}"}
         supplied_headers = kwargs.pop("headers", None)
         if isinstance(supplied_headers, Mapping):
@@ -159,13 +164,26 @@ class _YouTubeDataApiClient:
         try:
             response = self._client.request(method, endpoint, headers=headers, **kwargs)
         except httpx.HTTPError as exc:
-            raise YTMusicServerError("YouTube Data API could not be reached") from exc
+            raise NetworkFailure("YouTube Data API could not be reached") from exc
+        if response.status_code == 401 and self._token_refresher is not None:
+            self._access_token = self._token_refresher(self._access_token)
+            renewed = True
+            headers["Authorization"] = f"Bearer {self._access_token}"
+            try:
+                response = self._client.request(method, endpoint, headers=headers, **kwargs)
+            except httpx.HTTPError as exc:
+                raise NetworkFailure("YouTube Data API could not be reached") from exc
         if response.status_code >= 400:
             reason = self._error_reason(response)
-            detail = f" {reason}." if reason else ""
-            raise YTMusicServerError(
-                f"Server returned HTTP {response.status_code}: {response.reason_phrase}.{detail}"
+            exc = http_failure(
+                response.status_code,
+                reason=reason,
+                retry=response.headers.get("Retry-After"),
+                write=method.upper() not in {"GET", "HEAD"},
             )
+            if renewed and response.status_code == 401:
+                exc.operation_started_at = datetime.now(UTC)
+            raise exc
         # playlistItems.delete succeeds with 204 and no JSON body. Do not turn
         # a completed remote deletion into a failed local journal entry.
         if method.upper() == "DELETE" and response.status_code == 204:
@@ -576,9 +594,15 @@ class YTMusicApiProvider:
             self._library_client = _YouTubeDataApiClient(
                 str(token["access_token"]), client=self._http_client
             )
+            self._library_client._token_refresher = getattr(self, "_token_refresher", None)
         except (YTMusicError, ValueError, TypeError, KeyError) as exc:
             raise AuthorizationRequired("YouTube Music account needs to be reconnected") from exc
         return self._library_client
+
+    def set_token_refresher(self, refresher) -> None:
+        self._token_refresher = refresher
+        if isinstance(self._library_client, _YouTubeDataApiClient):
+            self._library_client._token_refresher = refresher
 
     def _catalog(self) -> YTMusicClient:
         if self._catalog_client is None:
@@ -590,17 +614,27 @@ class YTMusicApiProvider:
 
     @staticmethod
     def _status_code(exc: BaseException) -> int | None:
+        if isinstance(exc, requests.RequestException) and exc.response is not None:
+            return exc.response.status_code
         match = _STATUS_CODE.search(str(exc))
         return int(match.group(1)) if match else None
 
     @classmethod
     def _retryable(cls, exc: BaseException) -> bool:
         if isinstance(exc, requests.RequestException):
-            return True
+            return exc.response is None or exc.response.status_code >= 500
         return isinstance(exc, YTMusicServerError) and (cls._status_code(exc) or 0) >= 500
 
     @classmethod
     def _raise_provider_error(cls, exc: BaseException, *, track_write: bool) -> None:
+        if isinstance(exc, requests.RequestException):
+            if exc.response is None:
+                raise NetworkFailure("YouTube Music could not be reached") from exc
+            raise http_failure(
+                exc.response.status_code,
+                retry=exc.response.headers.get("Retry-After"),
+                write=track_write,
+            ) from exc
         status_code = cls._status_code(exc)
         text = str(exc).casefold()
         if (
@@ -610,7 +644,9 @@ class YTMusicApiProvider:
             or "quota" in text
         ):
             raise RateLimited() from exc
-        if status_code in {401, 403} or "oauth" in text or "authentication" in text:
+        if status_code == 403:
+            raise http_failure(403, write=track_write) from exc
+        if status_code == 401:
             raise AuthorizationRequired(
                 "YouTube Music authorization expired; reconnect the account"
             ) from exc

@@ -321,6 +321,43 @@ Activity review and sanitized scheduler logs provide investigation evidence.
    removals and asks the operator to resolve the occurrence manually.
 6. **Baseline storage scale:** validate JSON snapshots with realistic playlist
    sizes before committing to normalized tables or a hybrid schema.
-7. **Scheduler behavior:** opt-in automatic ticks and fail-closed recovery are
-   implemented; durable notifications and adaptive provider backoff remain future
-   improvements. OPS must stay running for scheduled checks to happen.
+7. **Scheduler behavior:** opt-in automatic ticks, scoped retry backoff and
+   fail-closed interrupted-write recovery are implemented. OPS must stay running
+   for scheduled checks to happen; durable notifications remain future work.
+
+## Provider health and historical runs
+
+Sync-run status is historical evidence, not current connection health. Account
+verification timestamps and scoped provider incidents persist independently of runs.
+Authentication recovery resolves only that account's older authentication incidents;
+resource permissions require a successful operation on the same resource. Legacy
+unattributed auth failures require both bound accounts verified after the failure.
+Scheduled retries consult unresolved incidents and their persisted retry deadlines.
+Recovery never queues work: the next configured scheduler tick uses the existing
+pair lease. Refresh uses an account lease and a ciphertext compare-and-swap so a
+concurrent reconnect cannot be overwritten by an old token refresh.
+
+## Automatic scheduler reliability
+
+Each scheduler tick enumerates pairs independently, then uses a fresh transaction
+per pair. The automatic-job lease spans review and Apply; the existing operation
+lease excludes concurrent manual mutations. All lease releases are conditional on
+ownership. Expired owners cannot renew or send the next write. Interrupted reviews
+are retryable; interrupted Apply with a write journal remains explicitly blocked
+because a provider may have accepted an unacknowledged request. Never replay that
+journal blindly or advance the baseline to conceal uncertainty.
+
+Nullable automatic_* fields on sync_pairs preserve check/attempt/success times,
+outcomes and next-evaluation estimates across restarts. A check is not a successful
+sync: uncertain matches/conflicts/bulk removals can intentionally prevent Apply.
+These holds remain visible while scheduled reviews continue at the normal interval.
+Recovery clears only relevant incidents, not run history or safety holds.
+
+APScheduler retains the recurring timer after job exceptions. A separate watchdog
+restores missing/paused timers without launching duplicate work. Monotonic heartbeat
+age detects stalled cycles independently of timezone changes. /healthz fails only
+for local scheduler liveness loss, not ordinary provider errors; Docker's health
+status alone does not automatically restart an unhealthy container. The authenticated
+/system/scheduler endpoint reports the real next timer and completed heartbeat.
+The CSRF-protected check-now control advances the existing timer and does not change
+the configured interval, provider retry deadlines, consent or safety checks.
